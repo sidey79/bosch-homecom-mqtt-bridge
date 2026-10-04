@@ -1,5 +1,7 @@
 # Implementierungsplan: bosch-homecom-mqtt-bridge
 
+> **Referenzdokument, eingefroren.** Entscheidungen und Abweichungen stehen unter [`docs/adr/`](docs/adr/).
+
 ## Ziel
 
 Ein Container liest Geräte aus der Bosch-HomeCom-Easy-Cloud aus und veröffentlicht die Werte auf MQTT, vorrangig
@@ -55,7 +57,7 @@ API). Sie gehören nicht hierher und bekommen bei Bedarf eigene Repositories.
 deploy/mosquitto.conf optionaler lokaler Broker
 docs/                 Betriebsdokumente (folgen mit der Implementierung)
 scripts/prototype/    Login- und Lese-Skripte aus der Machbarkeitsprüfung
-src/bosch-homecom-mqtt-bridge/       Anwendung
+src/bosch_homecom_mqtt_bridge/       Anwendung
 tests/                Unit-Tests
 Dockerfile, docker-compose*.yml, .env.example, VERSION, RELEASE_POLICY.md, renovate.json
 ```

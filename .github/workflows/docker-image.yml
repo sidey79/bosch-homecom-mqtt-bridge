@@ -144,9 +144,17 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
-          outputs: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY_IMAGE) || 'type=cacheonly' }}
+          outputs: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY_IMAGE) || 'type=docker,name=bosch-homecom-mqtt-bridge:ci' }}
           cache-from: type=gha,scope=${{ matrix.artifact }}
           cache-to: type=gha,mode=max,scope=${{ matrix.artifact }}
+
+      - name: Smoke test CLI
+        if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        run: docker run --rm bosch-homecom-mqtt-bridge:ci --version
+
+      - name: Smoke test native imports
+        if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        run: docker run --rm --entrypoint python3 bosch-homecom-mqtt-bridge:ci -c "import aiohttp, homecom_alt, paho.mqtt"
 
       - name: Export image digest
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
