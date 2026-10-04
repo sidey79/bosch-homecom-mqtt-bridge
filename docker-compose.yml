@@ -1,0 +1,15 @@
+name: bosch-homecom-mqtt-bridge
+
+services:
+  bridge:
+    build: .
+    volumes:
+      - bosch-data:/data
+    env_file:
+      - path: .env
+        required: false
+    # restart policy, port mapping and healthcheck follow with the bridge (see PLAN.md);
+    # until then the container exits right after printing its help.
+
+volumes:
+  bosch-data:

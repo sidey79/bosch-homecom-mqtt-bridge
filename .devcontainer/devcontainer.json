@@ -1,0 +1,21 @@
+{
+  "name": "bosch-homecom-mqtt-bridge",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+  ],
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "PYTHONPATH": "/workspace/src"
+  },
+  "postCreateCommand": "pip install --user -r requirements.txt",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}

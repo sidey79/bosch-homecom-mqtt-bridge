@@ -1,0 +1,5 @@
+name: bosch-homecom-mqtt-bridge
+
+services:
+  bridge:
+    network_mode: host

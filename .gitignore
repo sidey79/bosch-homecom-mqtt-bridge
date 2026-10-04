@@ -1,0 +1,8 @@
+.env
+docker-compose.override.yml
+.data/
+secrets/
+.tokens.json
+__pycache__/
+*.pyc
+.venv/
