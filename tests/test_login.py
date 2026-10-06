@@ -497,10 +497,11 @@ class CliTest(unittest.TestCase):
             timeout=30,
         )
 
-    def test_help_lists_login(self) -> None:
-        result = self.run_cli()
+    def test_help_lists_login_and_run(self) -> None:
+        result = self.run_cli("--help")  # without a command the bridge starts (run is the default)
         self.assertEqual(result.returncode, 0)
         self.assertIn("login", result.stdout)
+        self.assertIn("run", result.stdout)
 
     def test_login_rejects_invalid_config(self) -> None:
         result = self.run_cli("login", env={"BOSCH_BRAND": "foo"})
