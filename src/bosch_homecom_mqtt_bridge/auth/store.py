@@ -13,6 +13,9 @@ Locking:
 
 ``flock`` is reliable across containers only on local volumes, not on NFS or CIFS.
 
+Files: ``auth.lock`` and ``auth.json`` are opened with ``O_NOFOLLOW`` and must be regular files.
+Every ``OSError`` surfaces as ``AuthStorageError`` naming only the path and the errno name.
+
 Schema: ``{refresh_token, brand, generation, updated_at, last_refresh_at}``. Access token and
 ``exp`` are not stored (open decision D7). ``last_refresh_at`` is carried over unchanged; only the
 service refresh (token manager) will set it.
@@ -23,8 +26,11 @@ import asyncio
 import contextlib
 import errno
 import fcntl
+import glob
 import json
+import logging
 import os
+import stat
 import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -35,6 +41,9 @@ from pathlib import Path
 LOCK_FILE_NAME = "auth.lock"
 DEFAULT_LOCK_TIMEOUT = 30.0  # longer than the 15 s request timeout of a refresh POST
 DEFAULT_POLL_INTERVAL = 0.1
+MAX_AUTH_FILE_SIZE = 64 * 1024  # far above any valid file (tokens are a few KiB at most)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AuthStoreError(Exception):
@@ -46,7 +55,17 @@ class LockTimeoutError(AuthStoreError):
 
 
 class InvalidAuthFileError(AuthStoreError):
-    """``auth.json`` exists but cannot be parsed or misses required fields."""
+    """``auth.json`` exists but is not a regular file, too large, unparsable or incomplete."""
+
+
+class AuthStorageError(AuthStoreError):
+    """A file system operation on ``auth.json``, its temp file or ``auth.lock`` failed."""
+
+
+def _storage_error(path: Path, error: OSError) -> AuthStorageError:
+    """Message with path and errno name only; ``strerror`` and arguments are left out."""
+    name = errno.errorcode.get(error.errno, "unknown error") if error.errno else "unknown error"
+    return AuthStorageError(f"{path}: {name}")
 
 
 @dataclass(frozen=True)
@@ -76,7 +95,11 @@ def _now() -> str:
 
 
 class AuthStore:
-    """Use one instance per ``auth.json`` and process; the in-process lock lives on the instance."""
+    """Use one instance per ``auth.json`` and process; the in-process lock lives on the instance.
+
+    The lock is not reentrant: ``fn`` passed to ``locked_update`` must not call methods of the
+    same store, it would wait for itself until ``LockTimeoutError``.
+    """
 
     def __init__(
         self,
@@ -103,6 +126,13 @@ class AuthStore:
         or ``None`` to write nothing (e.g. because the file holds a newer generation that the
         caller adopts instead). The new generation is the file's generation plus one. Returns
         the state now in the file. If ``fn`` raises, the file stays untouched.
+
+        Cancellation while ``fn`` runs discards whatever ``fn`` obtained: if ``fn`` redeems a
+        single-use token, the result is lost. Callers that must not lose it shield the call
+        (``asyncio.shield``) or keep cancellation away from it.
+
+        Raises ``LockTimeoutError``, ``InvalidAuthFileError`` or ``AuthStorageError``; with
+        ``AuthStorageError`` from the write, ``fn`` has already run.
         """
         async with self._locked():
             current = self._read()
@@ -134,21 +164,29 @@ class AuthStore:
             try:
                 yield
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
         finally:
             self._local_lock.release()
 
     async def _acquire_flock(self, deadline: float) -> int:
-        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
         try:
+            fd = os.open(self.lock_path, flags, 0o600)
+        except OSError as error:
+            raise _storage_error(self.lock_path, error) from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise AuthStorageError(f"{self.lock_path}: not a regular file")
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     return fd
                 except OSError as error:
                     if error.errno not in (errno.EAGAIN, errno.EACCES):
-                        raise
+                        raise _storage_error(self.lock_path, error) from None
                 if time.monotonic() >= deadline:
                     raise LockTimeoutError(f"timed out waiting for {self.lock_path}")
                 await asyncio.sleep(self.poll_interval)
@@ -158,14 +196,33 @@ class AuthStore:
             raise
 
     def _read(self) -> AuthState | None:
+        invalid = InvalidAuthFileError(
+            f"{self.path} is not a valid auth file; back it up and remove it, then run login again"
+        )
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            # O_NONBLOCK: opening a FIFO planted at the path must not hang.
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
         except FileNotFoundError:
             return None
-        invalid = InvalidAuthFileError(f"{self.path} is not a valid auth file")
+        except OSError as error:
+            raise _storage_error(self.path, error) from None
+        chunks = []
+        size = 0
         try:
-            data = json.loads(raw)
-        except ValueError:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise invalid
+            while chunk := os.read(fd, 65536):
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > MAX_AUTH_FILE_SIZE:
+                    raise invalid
+        except OSError as error:
+            raise _storage_error(self.path, error) from None
+        finally:
+            os.close(fd)
+        try:
+            data = json.loads(b"".join(chunks).decode("utf-8"))
+        except ValueError:  # includes UnicodeDecodeError and JSONDecodeError
             raise invalid from None
         if not isinstance(data, dict):
             raise invalid
@@ -187,8 +244,25 @@ class AuthStore:
             raise invalid
         return AuthState(refresh_token, brand, generation, updated_at, last_refresh_at)
 
+    def _remove_stale_temp_files(self) -> None:
+        """Delete temp files of crashed writers; called under the lock.
+
+        Only files older than ``lock_timeout`` are removed, so a writer that does not use this
+        lock (none should exist) is not disturbed mid-write.
+        """
+        cutoff = time.time() - self.lock_timeout
+        for candidate in self.path.parent.glob(f".{glob.escape(self.path.name)}.*.tmp"):
+            with contextlib.suppress(OSError):
+                info = candidate.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                    candidate.unlink()
+
     def _write(self, state: AuthState) -> None:
-        """Write atomically: unique temp file (mode 600), fsync, rename, fsync of the directory."""
+        """Write atomically: unique temp file (mode 600), fsync, rename, fsync of the directory.
+
+        Durability is best effort: once ``os.replace`` succeeded the new file is in place, and a
+        failing ``fsync`` of the directory is only logged.
+        """
         payload = json.dumps(
             {
                 "refresh_token": state.refresh_token,
@@ -198,21 +272,33 @@ class AuthStore:
                 "last_refresh_at": state.last_refresh_at,
             }
         ).encode("utf-8")
+        self._remove_stale_temp_files()
         # mkstemp creates the file exclusively with mode 0600 under a fresh name, so a temp file
         # left behind by a crashed writer never blocks the next write.
-        fd, tmp_name = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
+        try:
+            fd, tmp_name = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
+        except OSError as error:
+            raise _storage_error(self.path.parent, error) from None
         try:
             with os.fdopen(fd, "wb") as tmp:
                 tmp.write(payload)
                 tmp.flush()
                 os.fsync(tmp.fileno())
             os.replace(tmp_name, self.path)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
+        except BaseException as error:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_name)
+            if isinstance(error, OSError):
+                raise _storage_error(self.path, error) from None
             raise
-        dir_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+            dir_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError as error:
+            _LOGGER.warning(
+                "auth.json was replaced, but syncing the directory failed (%s); durability is best effort",
+                _storage_error(self.path.parent, error),
+            )

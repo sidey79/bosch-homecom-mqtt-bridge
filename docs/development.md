@@ -13,6 +13,12 @@ make image     # Docker-Image bauen
 `make verify` prüft `docker-compose.yml` allein und zusammen mit `docker-compose.host.yml` bzw.
 `docker-compose.mqtt.yml`. Ein kaputtes Overlay lässt das Target scheitern.
 
+## Login lokal testen
+
+`login` liest den Code ohne Echo über `getpass` und braucht deshalb ein Terminal. Im Container immer mit
+`-it` starten (`docker compose run --rm -it bridge login`). Ohne TTY liest `getpass` mit Warnung von stdin (die
+Eingabe ist dann womöglich sichtbar) oder bekommt sofort EOF, dann endet der Login mit „Login abgebrochen.“
+
 ## Abhängigkeiten
 
 Alle Laufzeitabhängigkeiten stehen flach und exakt gepinnt in `requirements.txt`, ohne Hashes, auch die
@@ -61,3 +67,9 @@ git diff origin/main | grep -nE "^\+" \
 ```
 
 Beide Befehle müssen leer bleiben oder der Treffer wird in der PR begründet.
+
+Grenzen des Geheimnis-Scans: Er sucht nur nach `refresh_token`/`access_token` mit einem Literal von mindestens
+16 Zeichen in hinzugefügten Zeilen. Nicht erfasst werden u. a. andere Schlüsselnamen (`password`, `client_secret`,
+camelCase wie `refreshToken`), kürzere Werte, über Zeilen verteilte oder zusammengesetzte Literale, JWTs ohne
+Schlüssel, Binärdateien und Geheimnisse in bereits gelöschten Zeilen der Historie. Er ersetzt kein Review und kein
+dediziertes Werkzeug (z. B. gitleaks).

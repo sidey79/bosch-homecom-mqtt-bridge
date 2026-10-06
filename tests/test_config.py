@@ -55,6 +55,7 @@ class ConfigDefaultsTest(unittest.TestCase):
     def test_password_not_in_repr(self) -> None:
         config = load_config({"MQTT_PASSWORD": PASSWORD})
         self.assertNotIn(PASSWORD, repr(config))
+        self.assertNotIn("mqtt_url", repr(config))
 
 
 class ConfigValidationTest(unittest.TestCase):
@@ -92,6 +93,44 @@ class ConfigValidationTest(unittest.TestCase):
 
     def test_mqtt_url_with_credentials_is_not_echoed(self) -> None:
         self.assert_rejected({"MQTT_URL": f"tcp://user:{PASSWORD}@broker:1883"}, "MQTT_URL")
+
+    def test_mqtt_url_credentials_are_rejected_with_hint(self) -> None:
+        for url in (f"mqtt://user:{PASSWORD}@broker:1883", f"mqtts://:{PASSWORD}@broker", "mqtt://user@broker"):
+            with self.subTest(url=url):
+                error = self.assert_rejected({"MQTT_URL": url}, "MQTT_URL")
+                self.assertIn("MQTT_USERNAME", str(error))
+                self.assertIn("MQTT_PASSWORD", str(error))
+
+    def test_mqtt_url_path_query_fragment_and_port_zero_are_rejected(self) -> None:
+        for url in (
+            "mqtt://broker:1883/topic",
+            "mqtt://broker:1883?x=1",
+            "mqtt://broker:1883#frag",
+            "mqtt://broker?",
+            "mqtt://broker:0",
+        ):
+            with self.subTest(url=url):
+                self.assert_rejected({"MQTT_URL": url}, "MQTT_URL")
+        self.assertEqual(load_config({"MQTT_URL": "mqtt://broker:1883/"}).mqtt_url, "mqtt://broker:1883/")
+
+    def test_device_id(self) -> None:
+        self.assertEqual(load_config({"BOSCH_DEVICE_ID": "a_B-9"}).bosch_device_id, "a_B-9")
+        self.assertEqual(load_config({"BOSCH_DEVICE_ID": "x" * 64}).bosch_device_id, "x" * 64)
+        for value in ("x" * 65, "101/506", "id with space", "../etc", "id\nx"):
+            with self.subTest(value=value):
+                self.assert_rejected({"BOSCH_DEVICE_ID": value}, "BOSCH_DEVICE_ID")
+
+    def test_base_topic(self) -> None:
+        self.assertEqual(load_config({"MQTT_BASE_TOPIC": "home/heating"}).mqtt_base_topic, "home/heating")
+        for value in ("heating/#", "heat+ing", "$SYS/heating", "heat\x00ing", "/heating", "heating/", "home//heating"):
+            with self.subTest(value=value):
+                self.assert_rejected({"MQTT_BASE_TOPIC": value}, "MQTT_BASE_TOPIC")
+
+    def test_client_id(self) -> None:
+        self.assertEqual(load_config({"MQTT_CLIENT_ID": "$bridge"}).mqtt_client_id, "$bridge")
+        for value in ("bridge#1", "bridge+1", "bridge\x001"):
+            with self.subTest(value=value):
+                self.assert_rejected({"MQTT_CLIENT_ID": value}, "MQTT_CLIENT_ID")
 
 
 if __name__ == "__main__":

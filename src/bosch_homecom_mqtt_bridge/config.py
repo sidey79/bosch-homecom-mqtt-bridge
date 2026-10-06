@@ -6,6 +6,7 @@ so that passwords or credentials embedded in URLs cannot leak through a configur
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,8 @@ LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
 MQTT_SCHEMES = ("mqtt", "mqtts")
 POLL_INTERVAL_MIN = 30
 POLL_INTERVAL_MAX = 3600
+DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+MQTT_FORBIDDEN = ("#", "+", "\x00")
 
 
 class ConfigError(ValueError):
@@ -24,7 +27,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Config:
-    mqtt_url: str
+    mqtt_url: str = field(repr=False)
     mqtt_username: str | None
     mqtt_password: str | None = field(repr=False)
     mqtt_base_topic: str
@@ -68,11 +71,42 @@ def _mqtt_url(env: Mapping[str, str]) -> str:
     message = "MQTT_URL must look like mqtt://host[:port] or mqtts://host[:port]"
     try:
         parts = urlsplit(value)
-        _ = parts.port  # raises ValueError for a non-numeric or out-of-range port
     except ValueError:
         raise ConfigError(message) from None
-    if parts.scheme not in MQTT_SCHEMES or not parts.hostname:
+    if "@" in parts.netloc:
+        raise ConfigError("MQTT_URL must not contain credentials; use MQTT_USERNAME and MQTT_PASSWORD")
+    try:
+        port = parts.port  # raises ValueError for a non-numeric or out-of-range port
+    except ValueError:
+        raise ConfigError(message) from None
+    if (
+        parts.scheme not in MQTT_SCHEMES
+        or not parts.hostname
+        or port == 0
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+        or "?" in value
+        or "#" in value
+    ):
         raise ConfigError(message)
+    return value
+
+
+def _device_id(env: Mapping[str, str]) -> str | None:
+    value = _get(env, "BOSCH_DEVICE_ID")
+    if value is not None and not DEVICE_ID.fullmatch(value):
+        raise ConfigError("BOSCH_DEVICE_ID must be 1 to 64 letters, digits, '_' or '-'")
+    return value
+
+
+def _mqtt_name(env: Mapping[str, str], name: str, default: str, *, topic: bool) -> str:
+    value = _get(env, name) or default
+    if any(char in value for char in MQTT_FORBIDDEN) or (topic and value.startswith("$")):
+        rule = " and must not start with '$'" if topic else ""
+        raise ConfigError(f"{name} must not contain '#', '+' or NUL characters{rule}")
+    if topic and (value.startswith("/") or value.endswith("/") or "//" in value):
+        raise ConfigError(f"{name} must not start or end with '/' or contain empty levels ('//')")
     return value
 
 
@@ -83,10 +117,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         mqtt_url=_mqtt_url(env),
         mqtt_username=_get(env, "MQTT_USERNAME"),
         mqtt_password=_get(env, "MQTT_PASSWORD"),
-        mqtt_base_topic=_get(env, "MQTT_BASE_TOPIC") or "bosch-homecom",
-        mqtt_client_id=_get(env, "MQTT_CLIENT_ID") or "bosch-homecom-mqtt-bridge",
+        mqtt_base_topic=_mqtt_name(env, "MQTT_BASE_TOPIC", "bosch-homecom", topic=True),
+        mqtt_client_id=_mqtt_name(env, "MQTT_CLIENT_ID", "bosch-homecom-mqtt-bridge", topic=False),
         bosch_auth_path=Path(_get(env, "BOSCH_AUTH_PATH") or "/data/auth.json"),
-        bosch_device_id=_get(env, "BOSCH_DEVICE_ID"),
+        bosch_device_id=_device_id(env),
         bosch_brand=_choice(env, "BOSCH_BRAND", "bosch", BRANDS),
         bosch_poll_interval=_int(env, "BOSCH_POLL_INTERVAL", 60, POLL_INTERVAL_MIN, POLL_INTERVAL_MAX),
         health_port=_int(env, "HEALTH_PORT", 8080, 1, 65535),
