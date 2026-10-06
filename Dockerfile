@@ -1,4 +1,4 @@
-FROM python:3.13-slim@sha256:bf44cdfcb76cd3b41e879bc058fc37ec5872002ccfde7fcb765e218cde0cd79c AS build
+FROM python:3.13-slim@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d768ff6e378a93340c3b3db5f AS build
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --target /deps -r requirements.txt
