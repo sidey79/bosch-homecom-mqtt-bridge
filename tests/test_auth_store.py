@@ -25,6 +25,7 @@ from bosch_homecom_mqtt_bridge.auth.store import (
     AuthUpdate,
     InvalidAuthFileError,
     LockTimeoutError,
+    RefreshMarks,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,11 +145,17 @@ class AtomicWriteTest(StoreTestCase):
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         data = json.loads(self.path.read_text())
         self.assertEqual(
-            set(data), {"refresh_token", "brand", "generation", "updated_at", "last_refresh_at"}
+            set(data),
+            {
+                "refresh_token", "brand", "generation", "updated_at", "last_refresh_at", "access_token", "exp",
+                "login_id", "refresh_blocked", "blocked_generation", "not_before", "refresh_posts",
+            },
         )
         self.assertEqual(data["refresh_token"], "FAKE-refresh-1")
         self.assertEqual(data["generation"], 1)
         self.assertIsNone(data["last_refresh_at"])
+        self.assertIsNone(data["access_token"])
+        self.assertIsNone(data["exp"])
         self.assertEqual(stat.S_IMODE((self.dir / "auth.lock").stat().st_mode), 0o600)
 
     def test_generation_increments_and_last_refresh_is_carried_over(self) -> None:
@@ -244,6 +251,32 @@ class AtomicWriteTest(StoreTestCase):
         self.assertEqual(state.generation, 1)
         self.assertEqual(json.loads(self.path.read_text())["refresh_token"], "FAKE-after-crash")
 
+    def test_access_token_exp_and_last_refresh_are_persisted(self) -> None:
+        async def refreshed(_current: AuthState | None) -> AuthUpdate:
+            return AuthUpdate("FAKE-refresh-2", "bosch", "FAKE-access-2", 1_900_000_000, "2026-10-04T12:00:00+00:00")
+
+        asyncio.run(self.store.locked_update(update("FAKE-refresh-1")))
+        state = asyncio.run(self.store.locked_update(refreshed))
+        self.assertEqual((state.access_token, state.exp, state.generation), ("FAKE-access-2", 1_900_000_000, 2))
+        self.assertEqual(state.last_refresh_at, "2026-10-04T12:00:00+00:00")
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual(asyncio.run(self.store.read_locked()), state)
+        # A later login (no last_refresh_at) keeps the service's last_refresh_at.
+        login = asyncio.run(self.store.locked_update(update("FAKE-refresh-3")))
+        self.assertEqual(login.last_refresh_at, "2026-10-04T12:00:00+00:00")
+        self.assertIsNone(login.access_token)
+
+    def test_empty_access_token_or_invalid_exp_is_never_written(self) -> None:
+        asyncio.run(self.store.locked_update(update("FAKE-old")))
+        before = self.path.read_bytes()
+        for access, exp in (("", None), ("", 1), (None, 1_900_000_000), ("FAKE-a", 0), ("FAKE-a", True), ("FAKE-a", "1")):
+            async def fn(_current: AuthState | None, access=access, exp=exp) -> AuthUpdate:
+                return AuthUpdate("FAKE-new", "bosch", access, exp)  # type: ignore[arg-type]
+
+            with self.subTest(access=access, exp=exp), self.assertRaises(ValueError):
+                asyncio.run(self.store.locked_update(fn))
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_empty_or_missing_token_is_never_written(self) -> None:
         asyncio.run(self.store.locked_update(update("FAKE-old")))
         before = self.path.read_bytes()
@@ -288,6 +321,152 @@ class AtomicWriteTest(StoreTestCase):
         self.assertEqual((state.generation, state.refresh_token), (2, "FAKE-login-new"))
 
 
+class RefreshMarksTest(StoreTestCase):
+    def test_marks_keep_generation_tokens_and_updated_at(self) -> None:
+        async def first(_current: AuthState | None) -> AuthUpdate:
+            return AuthUpdate("FAKE-refresh-1", "bosch", "FAKE-access-1", 1_900_000_000, login_id="0a1b2c")
+
+        written = asyncio.run(self.store.locked_update(first))
+
+        async def block(_current: AuthState | None) -> RefreshMarks:
+            return RefreshMarks("K2", None, (1_600_000_000.5,))
+
+        marked = asyncio.run(self.store.locked_update(block))
+        self.assertEqual(
+            (marked.generation, marked.refresh_token, marked.access_token, marked.updated_at, marked.login_id),
+            (written.generation, "FAKE-refresh-1", "FAKE-access-1", written.updated_at, "0a1b2c"),
+        )
+        self.assertEqual((marked.refresh_blocked, marked.blocked_generation), ("K2", written.generation))
+        self.assertEqual(marked.refresh_posts, (1_600_000_000.5,))
+        self.assertEqual(asyncio.run(self.store.read_locked()), marked)
+
+        # A token write clears the marks except the posts it passes on, and keeps the login id.
+        async def refreshed(_current: AuthState | None) -> AuthUpdate:
+            return AuthUpdate("FAKE-refresh-2", "bosch", refresh_posts=(1_600_000_001.0,))
+
+        state = asyncio.run(self.store.locked_update(refreshed))
+        self.assertEqual((state.generation, state.login_id), (written.generation + 1, "0a1b2c"))
+        self.assertEqual((state.refresh_blocked, state.blocked_generation, state.not_before), (None, None, None))
+        self.assertEqual(state.refresh_posts, (1_600_000_001.0,))
+
+    def test_marks_need_a_file_and_valid_values(self) -> None:
+        def marks_fn(marks: RefreshMarks):
+            async def fn(_current: AuthState | None) -> RefreshMarks:
+                return marks
+
+            return fn
+
+        with self.assertRaises(ValueError):
+            asyncio.run(self.store.locked_update(marks_fn(RefreshMarks("K2"))))
+        self.assertFalse(self.path.exists())
+        asyncio.run(self.store.locked_update(update("FAKE-refresh-1")))
+        before = self.path.read_bytes()
+        for marks in (RefreshMarks(None, float("nan")), RefreshMarks(None, None, (-1.0,)), RefreshMarks("x" * 65)):
+            with self.subTest(marks=marks), self.assertRaises(ValueError):
+                asyncio.run(self.store.locked_update(marks_fn(marks)))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_invalid_marks_or_login_id_in_the_file_are_rejected(self) -> None:
+        valid = {"refresh_token": "FAKE-x", "brand": "bosch", "generation": 2, "updated_at": "t"}
+        for extra in (
+            {"refresh_blocked": "K2"},
+            {"blocked_generation": 2},
+            {"refresh_blocked": "K2", "blocked_generation": True},
+            {"refresh_blocked": "", "blocked_generation": 2},
+            {"not_before": -1},
+            {"not_before": "soon"},
+            {"refresh_posts": [1, "x"]},
+            {"refresh_posts": list(range(17))},
+            {"login_id": ""},
+            {"login_id": 5},
+        ):
+            with self.subTest(extra=extra):
+                self.write_raw({**valid, **extra})
+                with self.assertRaises(InvalidAuthFileError):
+                    asyncio.run(self.store.read_locked())
+        self.write_raw({**valid, "refresh_blocked": "K2", "blocked_generation": 1, "not_before": 5, "refresh_posts": [4]})
+        state = asyncio.run(self.store.read_locked())
+        self.assertEqual((state.refresh_blocked, state.blocked_generation, state.refresh_posts), ("K2", 1, (4,)))
+        self.write_raw({**valid, "refresh_posts": None})  # MINOR-4: null counts as missing
+        self.assertEqual(asyncio.run(self.store.read_locked()).refresh_posts, ())
+
+
+class ReviewHardeningTest(StoreTestCase):
+    """Security review PR 4: bounded values, closed sets for marks and login id, no token in repr."""
+
+    VALID = {"refresh_token": "FAKE-x", "brand": "bosch", "generation": 2, "updated_at": "t"}
+
+    def test_out_of_range_values_are_an_invalid_file_never_a_crash(self) -> None:
+        for extra in (
+            {"not_before": 10**400},
+            {"refresh_posts": [10**400]},
+            {"not_before": store_module.MAX_EPOCH + 1},
+            {"refresh_posts": [store_module.MAX_EPOCH + 0.5]},
+            {"access_token": "FAKE-a", "exp": 10**400},
+            {"access_token": "FAKE-a", "exp": store_module.MAX_EPOCH + 1},
+            {"refresh_blocked": "K11", "blocked_generation": 2},
+            {"refresh_blocked": "K2 ", "blocked_generation": 2},
+            {"refresh_blocked": "x", "blocked_generation": 2},
+            {"login_id": "login-b"},
+            {"login_id": "ABCDEF"},
+            {"login_id": "a" * 65},
+        ):
+            with self.subTest(extra=extra):
+                self.write_raw({**self.VALID, **extra})
+                with self.assertRaises(InvalidAuthFileError):
+                    asyncio.run(self.store.read_locked())
+        limit = store_module.MAX_EPOCH
+        self.write_raw({
+            **self.VALID, "access_token": "FAKE-a", "exp": limit, "not_before": limit, "refresh_posts": [limit],
+            "refresh_blocked": "K10", "blocked_generation": 2, "login_id": "0123456789abcdef" * 4,
+        })
+        state = asyncio.run(self.store.read_locked())
+        self.assertEqual((state.exp, state.refresh_blocked, len(state.login_id)), (limit, "K10", 64))
+
+    def test_out_of_range_values_are_never_written(self) -> None:
+        asyncio.run(self.store.locked_update(update("FAKE-refresh-1")))
+        before = self.path.read_bytes()
+
+        def returning(result):
+            async def fn(_current: AuthState | None):
+                return result
+
+            return fn
+
+        for result in (
+            AuthUpdate("FAKE-refresh-2", "bosch", "FAKE-access-2", store_module.MAX_EPOCH + 1),
+            AuthUpdate("FAKE-refresh-2", "bosch", login_id="login-b"),
+            RefreshMarks("K11"),
+            RefreshMarks(None, 10**400),
+        ):
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                asyncio.run(self.store.locked_update(returning(result)))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_marks_without_block_keep_a_block_of_the_same_generation(self) -> None:
+        # Security 3: unwritten K3 marks retried later must not lift a block written meanwhile.
+        self.write_raw({**self.VALID, "refresh_blocked": "K2", "blocked_generation": 2})
+
+        async def k3_marks(_current: AuthState | None) -> RefreshMarks:
+            return RefreshMarks(None, 1_600_000_100.0, (1_600_000_000.0,))
+
+        state = asyncio.run(self.store.locked_update(k3_marks))
+        self.assertEqual((state.refresh_blocked, state.blocked_generation, state.not_before), ("K2", 2, 1_600_000_100.0))
+        self.assertEqual(json.loads(self.path.read_text())["refresh_blocked"], "K2")
+        # A block of an older generation no longer applies and is dropped.
+        self.write_raw({**self.VALID, "generation": 3, "refresh_blocked": "K2", "blocked_generation": 2})
+        state = asyncio.run(self.store.locked_update(k3_marks))
+        self.assertEqual((state.refresh_blocked, state.blocked_generation), (None, None))
+
+    def test_repr_never_shows_tokens(self) -> None:
+        state = AuthState("FAKE-refresh-secret", "bosch", 1, "t", None, "FAKE-access-secret", 5)
+        change = AuthUpdate("FAKE-refresh-secret", "bosch", "FAKE-access-secret")
+        for value in (state, change):
+            with self.subTest(type=type(value).__name__):
+                self.assertNotIn("FAKE-", repr(value))
+                self.assertIn("bosch", repr(value))
+
+
 class ReadTest(StoreTestCase):
     def test_missing_file(self) -> None:
         self.assertIsNone(asyncio.run(self.store.read_locked()))
@@ -301,6 +480,11 @@ class ReadTest(StoreTestCase):
             json.dumps({**valid, "generation": 0}),
             json.dumps({**valid, "generation": True}),
             json.dumps({**valid, "brand": None}),
+            json.dumps({**valid, "access_token": ""}),
+            json.dumps({**valid, "access_token": 5}),
+            json.dumps({**valid, "access_token": "FAKE-a", "exp": "soon"}),
+            json.dumps({**valid, "access_token": "FAKE-a", "exp": -1}),
+            json.dumps({**valid, "exp": 1_900_000_000}),
         ]
         for raw in cases:
             with self.subTest(raw=raw):
@@ -309,6 +493,12 @@ class ReadTest(StoreTestCase):
                     asyncio.run(self.store.read_locked())
                 self.assertNotIn("FAKE-", str(ctx.exception))
                 self.assertIn("login", str(ctx.exception))
+
+    def test_file_written_before_d7_is_readable(self) -> None:
+        self.write_raw({"refresh_token": "FAKE-x", "brand": "bosch", "generation": 3, "updated_at": "t"})
+        state = asyncio.run(self.store.read_locked())
+        self.assertEqual((state.generation, state.access_token, state.exp), (3, None, None))
+        self.assertEqual((state.login_id, state.refresh_blocked, state.not_before, state.refresh_posts), (None, None, None, ()))
 
     def test_invalid_utf8_is_an_invalid_file(self) -> None:
         self.path.write_bytes(b'{"refresh_token": "\xff\xfe"}')

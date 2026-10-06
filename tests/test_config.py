@@ -132,6 +132,19 @@ class ConfigValidationTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assert_rejected({"MQTT_CLIENT_ID": value}, "MQTT_CLIENT_ID")
 
+    def test_poll_timeout_bounds(self) -> None:
+        self.assertEqual(load_config({}).bosch_poll_timeout, 300)
+        self.assertEqual(load_config({"BOSCH_POLL_TIMEOUT": ""}).bosch_poll_timeout, 300)
+        self.assertEqual(load_config({"BOSCH_POLL_TIMEOUT": "60"}).bosch_poll_timeout, 60)
+        self.assertEqual(load_config({"BOSCH_POLL_TIMEOUT": "900"}).bosch_poll_timeout, 900)
+        for value in ("59", "901", "5min"):
+            with self.subTest(value=value):
+                self.assert_rejected({"BOSCH_POLL_TIMEOUT": value}, "BOSCH_POLL_TIMEOUT")
+
+    def test_env_example_lists_poll_timeout_default(self) -> None:
+        lines = (Path(__file__).resolve().parents[1] / ".env.example").read_text().splitlines()
+        self.assertIn("BOSCH_POLL_TIMEOUT=300", lines)
+
 
 if __name__ == "__main__":
     unittest.main()

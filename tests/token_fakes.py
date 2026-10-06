@@ -1,4 +1,4 @@
-"""Fake clock, fake session and helpers shared by the refresh tests.
+"""Fake clock, fake session and helpers shared by the token manager tests.
 
 No test talks to the real cloud: ``FakeSession`` stands in for ``aiohttp.ClientSession`` and keeps
 the real URLs (the library's 400 -> None path depends on the exact token URL).
@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import inspect
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -19,6 +20,9 @@ import jwt
 from aiohttp import ClientConnectorError, ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
+
+from bosch_homecom_mqtt_bridge.auth.store import AuthStore
+from bosch_homecom_mqtt_bridge.auth.token_manager import TokenManager
 
 TOKEN_URL = "https://singlekey-id.com/auth/connect/token"
 JWT_KEY = "test-signing-key-for-fake-jwts-only-0123456789"
@@ -134,6 +138,7 @@ class FakeSession:
         self.token_handler = token_handler
         self.calls: list[tuple[str, str, dict]] = []
         self.token_posts: list[dict] = []
+        self.post_times: list[float] = []
         self.lock_held_during_post: list[bool] = []
         self.issued: list[tuple[str, str]] = []
         self.data_plan: list[Any] = []
@@ -150,6 +155,7 @@ class FakeSession:
         self.calls.append((method, url, kwargs))
         if url == TOKEN_URL:
             self.token_posts.append(dict(kwargs["data"]))
+            self.post_times.append(self.clock.now)
             if self.lock_path is not None:
                 self.lock_held_during_post.append(lock_is_held(self.lock_path))
             result = self.token_handler(self, kwargs) if self.token_handler else self.issue(kwargs)
@@ -177,8 +183,82 @@ class FakeSession:
             return {"value": "eco", "allowedValues": ["off", "eco", "comfort", "boost", "manual"]}
         return {"value": 1}
 
+    def gaps(self) -> list[float]:
+        """Seconds between consecutive token POSTs: the waits as the cloud sees them."""
+        return [b - a for a, b in zip(self.post_times, self.post_times[1:])]
+
     def bearers(self) -> list[str]:
         return [kw["headers"]["Authorization"].removeprefix("Bearer ") for _, url, kw in self.calls if url != TOKEN_URL]
+
+
+def write_auth_file(
+    path: Path,
+    generation: int,
+    refresh: str,
+    access: str | None,
+    last_refresh_at: str | None = None,
+    *,
+    login_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """Simulate a write by another process (e.g. ``login``): atomic, mode 600."""
+    tmp = path.with_name(".auth.json.test.tmp")
+    data = {
+        "refresh_token": refresh,
+        "brand": "bosch",
+        "generation": generation,
+        "updated_at": "2026-10-04T12:00:00+00:00",
+        "last_refresh_at": last_refresh_at,
+        "access_token": access,
+        "exp": jwt_exp(access) if access else None,
+        "login_id": login_id,
+        **extra,
+    }
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(data, handle)
+    os.replace(tmp, path)
+
+
+def read_auth_file(path: Path) -> dict:
+    return json.loads(path.read_text())
+
+
+class ManagerFixture:
+    """Builds a token manager on a temp ``auth.json`` with fake clock and recorded callbacks."""
+
+    def __init__(self, directory: Path, *, lock_timeout: float = 30.0) -> None:
+        self.dir = directory
+        self.path = directory / "auth.json"
+        self.store = AuthStore(self.path, lock_timeout=lock_timeout, poll_interval=0.01)
+        self.clock = FakeClock()
+        self.states: list[str] = []
+        self.events: list[str] = []
+        self.mounts = directory / "mounts"
+        self.mounts.write_text("/dev/root / ext4 rw 0 0\n")
+
+    def session(self, **kwargs: Any) -> FakeSession:
+        return FakeSession(self.clock, lock_path=self.store.lock_path, **kwargs)
+
+    def manager(self, session: FakeSession, *, poll_timeout: float = 300, store: AuthStore | None = None) -> TokenManager:
+        return TokenManager(
+            store or self.store,
+            session,  # type: ignore[arg-type]
+            brand="bosch",
+            poll_timeout=poll_timeout,
+            clock=self.clock.time,
+            sleep=self.clock.sleep,
+            on_state=self.states.append,
+            on_error=lambda code, _message: self.events.append(code),
+            mounts=str(self.mounts),
+        )
+
+    def seed(self, generation: int = 1, refresh: str = "FAKE-refresh-seed", *, remaining: float | None = None,
+             lifetime: float = ASSUMED_LIFETIME, last_refresh_at: str | None = None) -> str | None:
+        """Write ``auth.json``; with ``remaining`` an access token that expires that many seconds from now."""
+        access = make_jwt(self.clock.now + remaining - lifetime, lifetime) if remaining is not None else None
+        write_auth_file(self.path, generation, refresh, access, last_refresh_at)
+        return access
 
 
 class ListHandler(logging.Handler):

@@ -16,9 +16,22 @@ Locking:
 Files: ``auth.lock`` and ``auth.json`` are opened with ``O_NOFOLLOW`` and must be regular files.
 Every ``OSError`` surfaces as ``AuthStorageError`` naming only the path and the errno name.
 
-Schema: ``{refresh_token, brand, generation, updated_at, last_refresh_at}``. Access token and
-``exp`` are not stored (open decision D7). ``last_refresh_at`` is carried over unchanged; only the
-service refresh (token manager) will set it.
+Schema: ``{refresh_token, brand, generation, updated_at, last_refresh_at, access_token, exp,
+login_id, refresh_blocked, blocked_generation, not_before, refresh_posts}``.
+Access token and ``exp`` are persisted (decision D7, ADR 0001). Every field after ``last_refresh_at``
+is optional, so older files stay readable. ``last_refresh_at`` and ``login_id`` are carried over
+unless the update sets them; only the service refresh sets ``last_refresh_at``, only ``login`` sets
+a new random ``login_id`` (file identity, ADR 0001).
+
+The last four fields are the service's refresh bookkeeping (``RefreshMarks``), so it survives a
+restart: ``refresh_blocked`` names the table K class that requires a new login and applies only while
+``blocked_generation`` equals ``generation``; ``not_before`` and ``refresh_posts`` (epoch seconds)
+carry the K3 limit. A token write clears them, except ``refresh_posts`` it passes on itself. A marks
+write without ``blocked`` keeps a block that already applies to the current generation: only a login
+lifts it.
+
+Value ranges: times and ``exp`` lie in ``[0, MAX_EPOCH]``, ``refresh_blocked`` is ``K0`` to ``K10``
+and ``login_id`` is lower-case hex; anything else makes the file invalid, never a crash.
 """
 from __future__ import annotations
 
@@ -30,11 +43,12 @@ import glob
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -42,6 +56,10 @@ LOCK_FILE_NAME = "auth.lock"
 DEFAULT_LOCK_TIMEOUT = 30.0  # longer than the 15 s request timeout of a refresh POST
 DEFAULT_POLL_INTERVAL = 0.1
 MAX_AUTH_FILE_SIZE = 64 * 1024  # far above any valid file (tokens are a few KiB at most)
+MAX_REFRESH_POSTS = 16
+MAX_EPOCH = 10**11  # year ~5138; far beyond any real time, small enough for float and datetime
+BLOCK_CLASSES = frozenset(f"K{number}" for number in range(11))  # table K class names
+_LOGIN_ID = re.compile(r"[0-9a-f]{1,64}")
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,22 +90,87 @@ def _storage_error(path: Path, error: OSError) -> AuthStorageError:
 class AuthState:
     """Content of ``auth.json``."""
 
-    refresh_token: str
+    refresh_token: str = field(repr=False)
     brand: str
     generation: int
     updated_at: str
     last_refresh_at: str | None
+    access_token: str | None = field(default=None, repr=False)
+    exp: int | None = None
+    login_id: str | None = None
+    refresh_blocked: str | None = None
+    blocked_generation: int | None = None
+    not_before: float | None = None
+    refresh_posts: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
 class AuthUpdate:
-    """New token data to persist; the store assigns generation and timestamps."""
+    """New token data to persist; the store assigns generation and ``updated_at``.
 
-    refresh_token: str
+    ``last_refresh_at`` is set only by the service refresh, ``login_id`` only by ``login``;
+    ``None`` keeps the stored value.
+    """
+
+    refresh_token: str = field(repr=False)
     brand: str
+    access_token: str | None = field(default=None, repr=False)
+    exp: int | None = None
+    last_refresh_at: str | None = None
+    login_id: str | None = None
+    refresh_posts: tuple[float, ...] = ()
 
 
-UpdateFn = Callable[[AuthState | None], Awaitable[AuthUpdate | None]]
+@dataclass(frozen=True)
+class RefreshMarks:
+    """Bookkeeping write without new tokens: generation, tokens and ``updated_at`` stay as they are.
+
+    ``blocked`` (a table K class name) blocks the current generation.
+    """
+
+    blocked: str | None = None
+    not_before: float | None = None
+    posts: tuple[float, ...] = ()
+
+
+def _valid_access(access_token: object, exp: object) -> bool:
+    """Both absent, or a non-empty access token with an optional integer ``exp`` in ``(0, MAX_EPOCH]``."""
+    if access_token is None:
+        return exp is None
+    return (
+        isinstance(access_token, str)
+        and bool(access_token)
+        and (exp is None or (isinstance(exp, int) and not isinstance(exp, bool) and 0 < exp <= MAX_EPOCH))
+    )
+
+
+def _valid_login_id(value: object) -> bool:
+    return value is None or (isinstance(value, str) and _LOGIN_ID.fullmatch(value) is not None)
+
+
+def _valid_time(value: object) -> bool:
+    # Range check only: nan and inf fail it, and no huge integer is ever converted to float.
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and 0 <= value <= MAX_EPOCH
+
+
+def _valid_marks(blocked: object, blocked_generation: object, not_before: object, posts: object) -> bool:
+    """``blocked`` (``K0`` to ``K10``) and ``blocked_generation`` together or neither; valid times."""
+    if (blocked is None) != (blocked_generation is None) or not (blocked is None or blocked in BLOCK_CLASSES):
+        return False
+    if blocked_generation is not None and (
+        isinstance(blocked_generation, bool) or not isinstance(blocked_generation, int) or blocked_generation < 1
+    ):
+        return False
+    if not_before is not None and not _valid_time(not_before):
+        return False
+    return (
+        isinstance(posts, (list, tuple))
+        and len(posts) <= MAX_REFRESH_POSTS
+        and all(_valid_time(post) for post in posts)
+    )
+
+
+UpdateFn = Callable[[AuthState | None], Awaitable[AuthUpdate | RefreshMarks | None]]
 
 
 def _now() -> str:
@@ -124,30 +207,56 @@ class AuthStore:
 
         ``fn`` receives the state freshly read under the lock and returns the tokens to write,
         or ``None`` to write nothing (e.g. because the file holds a newer generation that the
-        caller adopts instead). The new generation is the file's generation plus one. Returns
-        the state now in the file. If ``fn`` raises, the file stays untouched.
+        caller adopts instead). The new generation is the file's generation plus one. ``fn`` may
+        instead return ``RefreshMarks``: then only the bookkeeping changes, the generation stays.
+        Returns the state now in the file. If ``fn`` raises, the file stays untouched.
 
         Cancellation while ``fn`` runs discards whatever ``fn`` obtained: if ``fn`` redeems a
         single-use token, the result is lost. Callers that must not lose it shield the call
         (``asyncio.shield``) or keep cancellation away from it.
 
         Raises ``LockTimeoutError``, ``InvalidAuthFileError`` or ``AuthStorageError``; with
-        ``AuthStorageError`` from the write, ``fn`` has already run.
+        ``AuthStorageError`` from the write, ``fn`` has already run. ``ValueError`` means ``fn``
+        returned data that fails validation; nothing was written.
         """
         async with self._locked():
             current = self._read()
             update = await fn(current)
             if update is None:
                 return current
-            if not isinstance(update.refresh_token, str) or not update.refresh_token:
-                raise ValueError("refusing to write an empty refresh token")
-            new_state = AuthState(
-                refresh_token=update.refresh_token,
-                brand=update.brand,
-                generation=(current.generation if current else 0) + 1,
-                updated_at=_now(),
-                last_refresh_at=current.last_refresh_at if current else None,
-            )
+            if isinstance(update, RefreshMarks):
+                if current is None:
+                    raise ValueError("refusing to write refresh marks without an auth file")
+                blocked = update.blocked
+                if blocked is None and current.blocked_generation == current.generation:
+                    blocked = current.refresh_blocked  # an existing block of this generation stays
+                new_state = replace(
+                    current,
+                    refresh_blocked=blocked,
+                    blocked_generation=current.generation if blocked is not None else None,
+                    not_before=update.not_before,
+                    refresh_posts=tuple(update.posts),
+                )
+            else:
+                if not isinstance(update.refresh_token, str) or not update.refresh_token:
+                    raise ValueError("refusing to write an empty refresh token")
+                if not _valid_access(update.access_token, update.exp):
+                    raise ValueError("refusing to write an empty access token or an invalid exp")
+                new_state = AuthState(
+                    refresh_token=update.refresh_token,
+                    brand=update.brand,
+                    generation=(current.generation if current else 0) + 1,
+                    updated_at=_now(),
+                    last_refresh_at=update.last_refresh_at or (current.last_refresh_at if current else None),
+                    access_token=update.access_token,
+                    exp=update.exp,
+                    login_id=update.login_id or (current.login_id if current else None),
+                    refresh_posts=tuple(update.refresh_posts),
+                )
+            if not _valid_login_id(new_state.login_id) or not _valid_marks(
+                new_state.refresh_blocked, new_state.blocked_generation, new_state.not_before, new_state.refresh_posts
+            ):
+                raise ValueError("refusing to write invalid refresh marks or login id")
             self._write(new_state)
             return new_state
 
@@ -231,18 +340,35 @@ class AuthStore:
         generation = data.get("generation")
         updated_at = data.get("updated_at")
         last_refresh_at = data.get("last_refresh_at")
-        if (
-            not isinstance(refresh_token, str)
-            or not refresh_token
-            or not isinstance(brand, str)
-            or isinstance(generation, bool)
-            or not isinstance(generation, int)
-            or generation < 1
-            or not isinstance(updated_at, str)
-            or not (last_refresh_at is None or isinstance(last_refresh_at, str))
-        ):
+        access_token = data.get("access_token")
+        exp = data.get("exp")
+        login_id = data.get("login_id")
+        blocked = data.get("refresh_blocked")
+        blocked_generation = data.get("blocked_generation")
+        not_before = data.get("not_before")
+        posts = data.get("refresh_posts") or []  # null counts as missing
+        try:
+            valid = (
+                isinstance(refresh_token, str)
+                and bool(refresh_token)
+                and isinstance(brand, str)
+                and not isinstance(generation, bool)
+                and isinstance(generation, int)
+                and generation >= 1
+                and isinstance(updated_at, str)
+                and (last_refresh_at is None or isinstance(last_refresh_at, str))
+                and _valid_access(access_token, exp)
+                and _valid_login_id(login_id)
+                and _valid_marks(blocked, blocked_generation, not_before, posts)
+            )
+        except (OverflowError, TypeError):  # defence in depth: a value must never crash the reader
+            valid = False
+        if not valid:
             raise invalid
-        return AuthState(refresh_token, brand, generation, updated_at, last_refresh_at)
+        return AuthState(
+            refresh_token, brand, generation, updated_at, last_refresh_at, access_token, exp,
+            login_id, blocked, blocked_generation, not_before, tuple(posts),
+        )
 
     def _remove_stale_temp_files(self) -> None:
         """Delete temp files of crashed writers; called under the lock.
@@ -270,6 +396,13 @@ class AuthStore:
                 "generation": state.generation,
                 "updated_at": state.updated_at,
                 "last_refresh_at": state.last_refresh_at,
+                "access_token": state.access_token,
+                "exp": state.exp,
+                "login_id": state.login_id,
+                "refresh_blocked": state.refresh_blocked,
+                "blocked_generation": state.blocked_generation,
+                "not_before": state.not_before,
+                "refresh_posts": list(state.refresh_posts),
             }
         ).encode("utf-8")
         self._remove_stale_temp_files()
