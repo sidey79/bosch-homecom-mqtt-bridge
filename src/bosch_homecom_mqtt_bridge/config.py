@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .topics import TopicError, validate_segment
+
 BRANDS = ("bosch", "buderus")
 LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
 MQTT_SCHEMES = ("mqtt", "mqtts")
@@ -21,6 +23,8 @@ POLL_TIMEOUT_MIN = 60
 POLL_TIMEOUT_MAX = 900
 DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 MQTT_FORBIDDEN = ("#", "+", "\x00")
+QUEUE_SIZE_MIN = 10
+QUEUE_SIZE_MAX = 100000
 
 
 class ConfigError(ValueError):
@@ -34,6 +38,7 @@ class Config:
     mqtt_password: str | None = field(repr=False)
     mqtt_base_topic: str
     mqtt_client_id: str
+    mqtt_queue_size: int
     bosch_auth_path: Path
     bosch_device_id: str | None
     bosch_brand: str
@@ -106,11 +111,18 @@ def _device_id(env: Mapping[str, str]) -> str | None:
 
 def _mqtt_name(env: Mapping[str, str], name: str, default: str, *, topic: bool) -> str:
     value = _get(env, name) or default
-    if any(char in value for char in MQTT_FORBIDDEN) or (topic and value.startswith("$")):
-        rule = " and must not start with '$'" if topic else ""
-        raise ConfigError(f"{name} must not contain '#', '+' or NUL characters{rule}")
-    if topic and (value.startswith("/") or value.endswith("/") or "//" in value):
-        raise ConfigError(f"{name} must not start or end with '/' or contain empty levels ('//')")
+    if topic:
+        # One rule set for topic levels, shared with the publisher (topics.validate_segment).
+        try:
+            for level in value.split("/"):
+                validate_segment(level, f"{name} level")
+        except TopicError:
+            raise ConfigError(
+                f"{name} must consist of non-empty levels without '+', '#', NUL or a leading '$'"
+            ) from None
+        return value
+    if any(char in value for char in MQTT_FORBIDDEN):
+        raise ConfigError(f"{name} must not contain '#', '+' or NUL characters")
     return value
 
 
@@ -123,6 +135,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         mqtt_password=_get(env, "MQTT_PASSWORD"),
         mqtt_base_topic=_mqtt_name(env, "MQTT_BASE_TOPIC", "bosch-homecom", topic=True),
         mqtt_client_id=_mqtt_name(env, "MQTT_CLIENT_ID", "bosch-homecom-mqtt-bridge", topic=False),
+        mqtt_queue_size=_int(env, "MQTT_QUEUE_SIZE", 1000, QUEUE_SIZE_MIN, QUEUE_SIZE_MAX),
         bosch_auth_path=Path(_get(env, "BOSCH_AUTH_PATH") or "/data/auth.json"),
         bosch_device_id=_device_id(env),
         bosch_brand=_choice(env, "BOSCH_BRAND", "bosch", BRANDS),
