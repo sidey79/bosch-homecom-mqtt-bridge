@@ -14,6 +14,7 @@ class ConfigDefaultsTest(unittest.TestCase):
         self.assertIsNone(config.mqtt_password)
         self.assertEqual(config.mqtt_base_topic, "bosch-homecom")
         self.assertEqual(config.mqtt_client_id, "bosch-homecom-mqtt-bridge")
+        self.assertEqual(config.mqtt_queue_size, 1000)
         self.assertEqual(config.bosch_auth_path, Path("/data/auth.json"))
         self.assertIsNone(config.bosch_device_id)
         self.assertEqual(config.bosch_brand, "bosch")
@@ -122,7 +123,7 @@ class ConfigValidationTest(unittest.TestCase):
 
     def test_base_topic(self) -> None:
         self.assertEqual(load_config({"MQTT_BASE_TOPIC": "home/heating"}).mqtt_base_topic, "home/heating")
-        for value in ("heating/#", "heat+ing", "$SYS/heating", "heat\x00ing", "/heating", "heating/", "home//heating"):
+        for value in ("heating/#", "heat+ing", "$SYS/heating", "heat\x00ing", "/heating", "heating/", "home//heating", "home/$SYS"):
             with self.subTest(value=value):
                 self.assert_rejected({"MQTT_BASE_TOPIC": value}, "MQTT_BASE_TOPIC")
 
@@ -144,6 +145,12 @@ class ConfigValidationTest(unittest.TestCase):
     def test_env_example_lists_poll_timeout_default(self) -> None:
         lines = (Path(__file__).resolve().parents[1] / ".env.example").read_text().splitlines()
         self.assertIn("BOSCH_POLL_TIMEOUT=300", lines)
+
+    def test_queue_size_bounds(self) -> None:
+        self.assertEqual(load_config({"MQTT_QUEUE_SIZE": "10"}).mqtt_queue_size, 10)
+        self.assertEqual(load_config({"MQTT_QUEUE_SIZE": "100000"}).mqtt_queue_size, 100000)
+        self.assert_rejected({"MQTT_QUEUE_SIZE": "9"}, "MQTT_QUEUE_SIZE")
+        self.assert_rejected({"MQTT_QUEUE_SIZE": "100001"}, "MQTT_QUEUE_SIZE")
 
 
 if __name__ == "__main__":
