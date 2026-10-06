@@ -8,8 +8,22 @@ services:
     env_file:
       - path: .env
         required: false
-    # restart policy, port mapping and healthcheck follow with the bridge (see PLAN.md);
-    # until then the container exits right after printing its help.
+    restart: unless-stopped
+    # Room for a refresh POST that is already running when SIGTERM arrives, plus the MQTT shutdown
+    # (docs/operations.md). `docker run` needs --stop-timeout 20 for the same reason.
+    stop_grace_period: 20s
+    # Ready only when the cloud answers and the broker is connected. No port mapping: the endpoint is
+    # for this check; HEALTH_PORT (default 8080) must match the container's environment.
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/readyz' % os.environ.get('HEALTH_PORT', '8080'), timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 volumes:
   bosch-data:

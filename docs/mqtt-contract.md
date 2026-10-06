@@ -62,8 +62,8 @@ Codes folgen mit den Features, die sie auslösen, und werden hier ergänzt. Fehl
 ### `<base>/<deviceId>/state`
 
 Retained, flaches JSON-Objekt der gelesenen Werte: Schlüssel sind Strings, Werte sind Zahl, Bool, String oder
-`null`, keine verschachtelten Objekte oder Listen. Nicht endliche Zahlen (NaN, ±Inf) erscheinen als `null`. Zahlen stehen in SI-Einheiten (Temperaturen in °C, einer abgeleiteten
-SI-Einheit) **ohne** Einheitentext. `updated_at` ist reserviert: Zeitpunkt des Abrufs, ISO-8601 in UTC,
+`null`, keine verschachtelten Objekte oder Listen. Nicht endliche Zahlen (NaN, ±Inf) erscheinen als `null`. Zahlen stehen **ohne** Einheitentext; ob die Cloud-Werte umgerechnet werden, legt der Adapter je Gerätetyp fest
+(`wddw2`: Werte wie geliefert, Temperaturen in °C, `water_total_consumption` in Litern (gegen die App geprüft), `hs_electricity_total_consumption` in kWh (gegen die App geprüft), `hs_operation_hours` in Stunden und `hs_starts` als Anzahl Betriebszyklen (gegen die App geprüft), `water_flow` in l/min und `hs_actual_power` in kW laut App (Wert im Leerlauf 0, Skalierung bei Last noch zu prüfen)). `updated_at` ist reserviert: Zeitpunkt des Abrufs, ISO-8601 in UTC,
 sekundengenau mit `Z`, etwa `2026-10-04T12:00:00Z`. Die Namen der Werte je Gerätetyp legt der Adapter fest
 (PR `feat/wddw2-poller-health`).
 
