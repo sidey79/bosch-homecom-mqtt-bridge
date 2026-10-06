@@ -55,7 +55,8 @@ Weitere Werte kommen nur mit einer Änderung dieses Vertrags hinzu. Konsumenten 
 
 ### `<base>/event/error`
 
-Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannter Code: `AUTH_REQUIRED`. Weitere
+Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannte Codes: `AUTH_REQUIRED` (Refresh-Token fehlt oder abgelehnt) und `POLL_FAILED` (Abruf bei der Cloud
+fehlgeschlagen; einmal je Übergang in `error`, die Nachricht nennt nur den Ausnahmetyp). Weitere
 Codes folgen mit den Features, die sie auslösen, und werden hier ergänzt. Fehler-Events sind Hinweise, kein Zustand.
 
 ### `<base>/<deviceId>/state`
@@ -65,6 +66,12 @@ Retained, flaches JSON-Objekt der gelesenen Werte: Schlüssel sind Strings, Wert
 SI-Einheit) **ohne** Einheitentext. `updated_at` ist reserviert: Zeitpunkt des Abrufs, ISO-8601 in UTC,
 sekundengenau mit `Z`, etwa `2026-10-04T12:00:00Z`. Die Namen der Werte je Gerätetyp legt der Adapter fest
 (PR `feat/wddw2-poller-health`).
+
+**Gerätetyp `wddw2`** (Schlüssel ohne Einheitentext, Werte wie von der Cloud geliefert, nicht umgerechnet; fehlende
+Werte `null`): je Warmwasserkreis `dhw<n>_` + `operation_mode`, `air_box_temperature`, `fan_speed`,
+`inlet_temperature`, `outlet_temperature`, `water_flow`, `safety_temperature`, `temp_level_<Stufe>`; dazu
+`hs_starts`, `hs_actual_power`, `hs_power_percentage`, `hs_operation_hours`, `hs_electricity_total_consumption`,
+`water_total_consumption`, `holiday_mode` und `notifications` (Anzahl).
 
 ### `<base>/<deviceId>/availability`
 
