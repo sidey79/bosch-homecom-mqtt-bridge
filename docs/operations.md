@@ -34,17 +34,41 @@ Der Compose-Healthcheck fragt `/readyz`. `restart: unless-stopped` startet nur b
 `unhealthy`: Bei `auth_required` hilft kein Neustart, nur ein Login. Der Container bleibt dann `unhealthy`, und
 `<base>/event/status` meldet `auth_required` (Fehler-Event `AUTH_REQUIRED`).
 
-## Broker und Netzwerk (offen, D5)
+## Broker und Netzwerk
 
-Broker, Zugangsdaten und der Name des FHEM-Netzwerks sind nicht entschieden. `MQTT_URL` muss vom Container aus
-erreichbar sein: im Compose-Overlay `docker-compose.mqtt.yml` ist es `mqtt://mqtt:1883` (mitgelieferter Mosquitto,
-anonym, nur für Tests), mit `docker-compose.host.yml` läuft die Bridge im Host-Netzwerk. Für einen vorhandenen Broker
-(`mqtts://` prüft das Zertifikat gegen die System-CAs) `MQTT_URL` und Zugangsdaten in `.env` eintragen.
+`MQTT_URL` muss vom Container aus erreichbar sein. Im Compose-Overlay `docker-compose.mqtt.yml` ist es `mqtt://mqtt:1883`
+(mitgelieferter Mosquitto, anonym, nur für Tests), mit `docker-compose.host.yml` läuft die Bridge im Host-Netzwerk.
+Für einen vorhandenen Broker (`mqtts://` prüft das Zertifikat gegen die System-CAs) `MQTT_URL`, `MQTT_USERNAME` und
+`MQTT_PASSWORD` in `.env` eintragen.
 
-## FHEM (MQTT2_DEVICE, Beispiel, nicht gegen ein echtes FHEM getestet)
+**FHEM als Broker im eigenen Docker-Netzwerk:** Eine lokale `docker-compose.override.yml` (von Git ignoriert, wird von
+`docker compose` automatisch geladen) hängt die Bridge an das bestehende Netzwerk und setzt `MQTT_URL`:
 
-Topics und Payloads stehen in [mqtt-contract.md](mqtt-contract.md). Ein Gerät mit `<deviceId>` = `101506113` und
-`<base>` = `bosch-homecom`:
+```yaml
+services:
+  bridge:
+    environment:
+      MQTT_URL: ${FHEM_MQTT_URL:-mqtt://fhem:1883}
+    networks:
+      - smarthome
+networks:
+  smarthome:
+    external: true
+    name: ${SMARTHOME_NETWORK:-smarthome}
+```
+In `.env` stehen `SMARTHOME_NETWORK` (Name des Netzwerks, `docker network ls`), `FHEM_MQTT_URL` und die
+Zugangsdaten. Nicht zusammen mit `docker-compose.mqtt.yml` verwenden.
+
+## FHEM (MQTT2_SERVER mit MQTT2_DEVICE, gegen ein echtes FHEM geprüft)
+
+Topics und Payloads stehen in [mqtt-contract.md](mqtt-contract.md). Läuft FHEM selbst als Broker (`MQTT2_SERVER`),
+legt Autocreate das Gerät `bosch-homecom_<deviceId>` als `MQTT2_DEVICE` an. Geprüft mit einem Bosch Tronic 7000
+(`wddw2`): Die Readings heißen `availability`, `state_<Schlüssel>` (z. B. `state_dhw1_outlet_temperature`,
+`state_hs_starts`, `state_updated_at`) und `status_state`/`status_connected` (Status der Bridge). Werte mit `null` im
+JSON (z. B. `dhw1_air_box_temperature` beim Tronic 7000) erscheinen nicht als Reading.
+
+Wer lieber eigene Reading-Namen und ein Gerät pro `<deviceId>` möchte, setzt das Gerät von Hand an, hier mit
+`<deviceId>` = `101506113` und `<base>` = `bosch-homecom` (nicht getestet):
 
 ```
 defmod bosch_tronic MQTT2_DEVICE
@@ -53,7 +77,7 @@ attr bosch_tronic readingList bosch-homecom/101506113/state:.* { json2nameValue(
 attr bosch_tronic devStateIcon online:10px-kreis-gruen offline:10px-kreis-rot
 ```
 
-Der Broker muss in FHEM als `MQTT2_CLIENT` angebunden sein. Die Bridge liest nur; es gibt keine Befehle.
+Die Bridge liest nur; es gibt keine Befehle.
 
 ## Restrisiken (ADR 0001)
 
@@ -67,5 +91,6 @@ Der Broker muss in FHEM als `MQTT2_CLIENT` angebunden sein. Die Bridge liest nur
   zurückgespieltes Backup wird bewusst übernommen; sein Refresh-Token ist meist schon verbraucht, dann ist ein neuer
   Login nötig.
 - **Healthcheck:** `unhealthy` bei `auth_required` löst keinen Neustart aus (siehe oben).
-- **Lange Abrufe:** Der Poll-Timeout `BOSCH_POLL_TIMEOUT` (Standard 300 s) ist noch nicht gegen reale Abrufdauern
-  geprüft; das gilt auch für die Einheiten der gelieferten Werte (die Bridge rechnet nichts um).
+- **Lange Abrufe:** Der Poll-Timeout `BOSCH_POLL_TIMEOUT` (Standard 300 s) liegt weit über der gemessenen Abrufdauer
+  (rund 65 s für Discovery und ersten Poll eines `wddw2`). Die Bridge rechnet keine Werte um; die Einheiten stehen im
+  Vertrag.
