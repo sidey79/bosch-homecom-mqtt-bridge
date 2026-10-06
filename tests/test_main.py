@@ -44,3 +44,13 @@ class MainTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadinessTest(unittest.TestCase):
+    def test_lost_broker_connection_reads_as_disconnected(self) -> None:
+        from bosch_homecom_mqtt_bridge.app import readiness
+
+        self.assertEqual(readiness("ready", False), "disconnected")
+        self.assertEqual(readiness("auth_required", False), "disconnected")
+        self.assertEqual(readiness("ready", True), "ready")
+        self.assertEqual(readiness("error", True), "error")

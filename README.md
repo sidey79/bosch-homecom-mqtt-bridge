@@ -2,7 +2,7 @@
 
 Bridge zwischen der Bosch-HomeCom-Easy-Cloud und MQTT, gebaut für Geräte aus der HomeCom-Easy-App, zuerst ein Bosch Tronic 7000 (Gerätetyp `wddw2`), und den Einsatz mit FHEM. Aufbau, Pipelines und Betrieb folgen dem Schwesterprojekt `whatsmeow-mqtt-bridge`.
 
-**Status:** Das Repository ist vorbereitet, die Bridge ist noch nicht implementiert. Der Plan, einschließlich des Logins über den Container, steht in [`PLAN.md`](PLAN.md). Der Container gibt derzeit nur Hilfe und Version aus und beendet sich danach.
+**Status:** Die Bridge liest den Bosch Tronic 7000 (`wddw2`) nur lesend aus der Cloud und veröffentlicht die Werte per MQTT ([Vertrag](docs/mqtt-contract.md)). Gegen die echte Cloud und einen echten Broker ist sie noch nicht über längere Zeit gelaufen. Plan und Hintergründe stehen in [`PLAN.md`](PLAN.md), der Betrieb in [`docs/operations.md`](docs/operations.md).
 
 ## Schnellstart im Devcontainer
 
@@ -14,9 +14,9 @@ docker build -t bosch-homecom-mqtt-bridge .
 docker run --rm bosch-homecom-mqtt-bridge --version
 ```
 
-Bis zur Implementierung der Bridge beendet sich der Container sofort, deshalb startet `docker compose up` ihn nicht dauerhaft.
+`docker compose up` startet die Bridge (Befehl `run`, der Standard). Vorher ist einmal der Login nötig (nächster Abschnitt).
 
-### Login (mit der Bridge geplant)
+### Login
 
 Die Erstanmeldung läuft über den Browser, weil die Bosch-SingleKey-ID ein CAPTCHA verlangt:
 
