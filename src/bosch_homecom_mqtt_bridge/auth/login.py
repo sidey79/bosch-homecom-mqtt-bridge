@@ -36,6 +36,7 @@ from tenacity import RetryError
 
 from ..config import Config
 from ..logging_setup import add_secret
+from .claims import persistable_exp, token_times
 from .store import AuthState, AuthStore, AuthStoreError, AuthUpdate, InvalidAuthFileError, LockTimeoutError
 
 EXIT_OK = 0
@@ -117,12 +118,12 @@ def _show(value: object) -> str:
     return repr(value)
 
 
-def _print_lifetime(api: HomeComAlt, out: TextIO) -> None:
-    expires_at = api.token_expires_at()
-    if expires_at is None:
-        print("Restlaufzeit des Access-Tokens unbekannt (kein exp).", file=out)
+def _print_lifetime(access_token: str | None, out: TextIO) -> None:
+    times = token_times(access_token)
+    if times is None:
+        print("Restlaufzeit des Access-Tokens unbekannt (kein gültiges exp).", file=out)
         return
-    remaining = int((expires_at - datetime.now(UTC)).total_seconds())
+    remaining = int(times[0] - datetime.now(UTC).timestamp())
     print(f"Access-Token gültig noch {remaining} s.", file=out)
 
 
@@ -178,7 +179,16 @@ async def run_login(
         add_secret(refresh)
         options.token = access
         options.refresh_token = refresh
-        return AuthUpdate(refresh_token=refresh, brand=brand)
+        # D7: the access token is persisted too, so a restart can use it without a refresh. A new
+        # random login_id marks the file as a new login even if its generation starts over at 1.
+        # The token manager's refresh marks are not passed on: a login clears them.
+        return AuthUpdate(
+            refresh_token=refresh,
+            brand=brand,
+            access_token=access,
+            exp=persistable_exp(access),
+            login_id=secrets.token_hex(16),
+        )
 
     # The store lock is taken before the code is redeemed. A lock timeout therefore aborts before
     # validate_auth: no token pair has been issued, so nothing can be lost, and the user just
@@ -217,7 +227,7 @@ async def run_login(
         return EXIT_FAILED
 
     print(f"Login gespeichert in {store.path} (Generation {saved.generation}).", file=out)
-    _print_lifetime(api, out)
+    _print_lifetime(options.token, out)
 
     print("Prüfe Gateways … (bei Zeitüberschreitung mit Wiederholungen)", file=out)
     try:

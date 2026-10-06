@@ -24,6 +24,25 @@ Datei hat die Rechte 600 und wird atomar geschrieben. Ein Neustart nutzt einen g
 Datei ohne Refresh. `login` schreibt beide Felder, setzt `last_refresh_at` aber nicht; dieses Feld setzt nur der
 Dienst-Refresh.
 
+`exp` und `iat` werden aus dem JWT nur übernommen, wenn sie plausibel sind: endliche Zahlen, kein `bool`,
+`exp > 0`, `iat < exp` (sonst wird `iat` verworfen). Ein `exp` mehr als 30 Tage nach der aktuellen Zeit gilt als
+unlesbar (zweites Review PR 4), damit ein manipulierter Token nicht monatelang frisch aussieht. Ein Helper
+(`auth/claims.py`) gilt für Login und Dienst; ein `exp` zwischen 0 und 1 wird nicht gespeichert. Das gespeicherte `exp` dient als Rückfallwert, wenn genau dieser
+Access-Token aus der Datei kein lesbares JWT ist (Review PR 4). Beide Schreiber leiten `exp` heute aus dem JWT ab;
+der Rückfall greift also nur bei Dateien anderer Herkunft oder wenn PyJWT einen Token künftig nicht mehr liest.
+Streichen hätte die Nutzerentscheidung D7 geändert.
+
+**Datei-Identität und Buchführung (Review PR 4):** `login` schreibt zusätzlich eine zufällige `login_id`
+(Refreshes übernehmen sie). Weitere optionale Felder gehören dem Dienst: `refresh_blocked` (Klasse aus Tabelle K)
+mit `blocked_generation`, `not_before` und `refresh_posts` (Epochensekunden). Ein Token-Schreiben löscht sie,
+nur `refresh_posts` gibt der Dienst-Refresh selbst weiter; ein Login löscht alle. Ältere Dateien ohne diese Felder
+bleiben lesbar, `"refresh_posts": null` gilt als fehlend.
+
+**Wertebereiche (zweites Review PR 4):** Zeitwerte (`not_before`, `refresh_posts`) und `exp` liegen in
+`[0, MAX_EPOCH]` mit `MAX_EPOCH = 10^11`; `refresh_blocked` ist `K0` bis `K10`; `login_id` besteht aus 1 bis 64
+Kleinbuchstaben-Hexziffern. Alles andere macht die Datei ungültig (`InvalidAuthFileError`), ein `OverflowError`
+erreicht nie den Aufrufer. `AuthState` und `AuthUpdate` zeigen Tokens nicht in `repr`.
+
 ### Orchestrierung R-b
 
 - Datenabrufe und Discovery laufen über Instanzen mit `auth_provider=False`. Dort ist `get_token()` ein No-op.
@@ -31,8 +50,10 @@ Dienst-Refresh.
   `ConnectionOptions`. Das Feld `ConnectionOptions.auth_provider` wird in 1.8.2 nicht ausgewertet; die Fabrik
   setzt es trotzdem ausdrücklich auf `False`. Ein Test prüft, dass die Refresh-Instanz dennoch refresht.
 - `ensure_fresh()` läuft vor jeder Discovery und jedem Poll und liest die Datei bei jedem Aufruf unter dem
-  Lock (`read_locked()`). Eine höhere Generation wird übernommen. Ein fehlender oder unlesbarer Access-Token
-  gilt als abgelaufen.
+  Lock (`read_locked()`). Die Datei wird übernommen, sobald Generation, `login_id` oder Refresh-Token von dem
+  abweichen, was der Prozess zuletzt gelesen oder geschrieben hat, und nichts Ungespeichertes ansteht. Das deckt
+  einen Login ab, eine gelöschte und neu angelegte Datei (Generation wieder 1) und ein zurückgespieltes Backup.
+  Ein fehlender oder unlesbarer Access-Token gilt als abgelaufen; ist die halbe Laufzeit nicht positiv, ebenso.
 - **Marge** = `min(BOSCH_POLL_TIMEOUT + 60 s, Laufzeit / 2)`, mit Laufzeit = `exp − iat`, ersatzweise
   `exp − Zeitpunkt des Erhalts`. Ist `BOSCH_POLL_TIMEOUT + 60 s` größer als die halbe Laufzeit, wird einmal
   gewarnt. `BOSCH_POLL_TIMEOUT` liegt zwischen 60 und 900 s, Default 300 s. Der Timeout umschließt nur
@@ -41,7 +62,9 @@ Dienst-Refresh.
 - `refresh_locked()` ist eine einzige Task je Prozess. Aufrufer warten per `asyncio.shield` auf sie. Unter dem
   Lock liest die Task zuerst die Datei. Hat ein Login eine höhere Generation mit frischem Access-Token
   geschrieben, geht kein POST raus. Andernfalls wird nur mit dem übernommenen Refresh-Token refresht, nie mit
-  dem alten. Nach einem Erfolg wird sofort geschrieben (Generation + 1, `last_refresh_at`).
+  dem alten. Nach einem Erfolg wird sofort geschrieben (Generation + 1, `last_refresh_at`). Die neuen Tokens
+  werden im Speicher gesichert, bevor ihre Claims gelesen werden; Typ und Inhalt werden vorher geprüft (Text,
+  nicht leer, sonst K9 mit Rollback, geloggt wird nur der Typname).
 - **Phasen der Task:** `acquiring` und `backoff` sind abbrechbar, `sending` und `writing` werden abgewartet.
   Zwischen dem erfolgreichen `LOCK_NB` und `sending` liegt kein `await`, der Lock wird im `finally` freigegeben.
   Nach `aclose()` beginnt kein neuer Versuch. `auth_required` und `disconnected` setzt die Task selbst.
@@ -50,15 +73,39 @@ Dienst-Refresh.
 - **Schreibfehler nach erfolgreichem Refresh:** Der Dienst läuft mit den Tokens im Speicher weiter und loggt
   einen ERROR. Vor jedem Poll versucht er das Schreiben erneut. Solange nicht geschrieben ist, startet nur dann
   ein weiterer Refresh, wenn der Access-Token fällig wird oder ein 401 kommt; dafür nimmt er den neuesten
-  Refresh-Token aus dem Speicher. Schreibt ein Login zwischendurch eine höhere Generation, gewinnt der Login.
+  Refresh-Token aus dem Speicher. Schreibt ein Login zwischendurch, gewinnt der Login. Ein Schreibversuch, dessen
+  Tokens inzwischen ersetzt oder geschrieben wurden, schreibt nichts. Lehnt die Validierung des Stores die Daten ab
+  (`ValueError`), gilt dasselbe wie bei einem Schreibfehler.
 - **401 bei einem Datenabruf:** Darauf folgen genau ein Refresh und genau eine Wiederholung des Polls. Ein
   zweiter 401 führt zu `auth_required`, wenn der verwendete Token laut `exp` noch gültig war. Sonst läuft
   `ensure_fresh()` einmal erneut.
 - **`auth_required`:** Der Dienst stellt keine Cloud-Anfragen. Alle 10 s liest er die Datei unter dem Lock und
-  übernimmt eine höhere Generation. Beim Eintritt geht das Fehler-Event `AUTH_REQUIRED` raus.
+  übernimmt einen neuen Login. Beim Eintritt geht das Fehler-Event `AUTH_REQUIRED` raus. Braucht der übernommene
+  Login noch einen Refresh, wechselt der Zustand zuerst nach `starting`; scheitert der Refresh erneut, ist das ein
+  neuer Übergang nach `auth_required` mit eigenem Event.
+- **Lange Wartezeiten (K3, K4):** Sie laufen in Schritten von 10 s; nach jedem Schritt wird die Datei unter dem
+  Lock gelesen. Ein Login beendet die Wartezeit: Mit frischem Access-Token folgt `ready`, sonst sofort ein Versuch.
+  Eine neue `login_id` öffnet ein neues K3-Fenster (`not_before` und gezählte POSTs im Speicher werden verworfen),
+  und der K4-Backoff beginnt wieder bei 30 s.
+- **Uhr geht vor:** Ist ein gerade erhaltener Token laut lokaler Uhr schon fällig, loggt der Dienst einmal eine
+  WARNING und startet für 60 s (`CRASH_LOOP_GUARD`) keinen weiteren Refresh. So bleibt es bei höchstens einem POST
+  je 60 s statt einem je Poll. Eine Rechnung über `iat` wurde verworfen: Für Tokens aus der Datei ist der
+  Zeitpunkt des Erhalts nicht verlässlich bekannt.
+- **Neustartfest (Nutzerentscheidung 2026-10-06):** Führt ein gesendeter Refresh zu `auth_required` (K0, K1, K2,
+  K5–K10), schreibt der Dienst unter demselben Lock `refresh_blocked` mit der aktuellen Generation; Tokens und
+  Generation bleiben unverändert, damit die Übernahme eines Logins nicht gestört wird. Nach einem Neustart geht
+  kein POST raus, solange `blocked_generation` gleich der Generation der Datei ist; nur ein Login (neue
+  Generation oder Datei-Identität) hebt das auf. K3 schreibt `not_before` und die POST-Zeitpunkte der letzten
+  Stunde; nach einem Neustart wartet der Dienst bis `not_before` (höchstens 1 h, ein späterer Wert gilt als
+  unplausibel). Scheitert dieses Schreiben, bleibt der Zustand im Speicher, der Versuch gilt nicht als K4, und der
+  Dienst schreibt bei jeder 10-s-Prüfung erneut. Ein solches Nachschreiben ohne Block hebt einen inzwischen
+  gesetzten Block derselben Generation nie auf: Der Store übernimmt ihn. Ein zweiter 401 eines frisch refreshten Tokens wird nicht
+  gespeichert: Der Token selbst ist dann nicht als schlecht bekannt.
 - **Crash-Loop-Schutz:** Liegt `last_refresh_at` weniger als 60 s zurück, wartet der erste Refresh nach dem
-  Start, bis 60 s vergangen sind. Ein gültiger Access-Token aus der Datei macht den Refresh überflüssig.
-- **NFS/CIFS:** Liegt das Verzeichnis von `auth.json` laut `/proc/mounts` auf NFS oder CIFS, wird gewarnt.
+  Start, bis 60 s vergangen sind, höchstens 60 s (auch bei einem Zeitstempel in der Zukunft). Geprüft wird unter
+  dem Lock, nachdem die Datei gelesen ist. Ein gültiger Access-Token aus der Datei macht den Refresh überflüssig.
+- **Netz- und FUSE-Dateisysteme:** Liegt das Verzeichnis von `auth.json` laut `/proc/mounts` auf NFS, CIFS/SMB,
+  Ceph, GlusterFS, 9p, virtiofs, AFS oder einem `fuse*`-Typ, wird gewarnt.
 
 ### D11: Option (b) – Retry nur bei K3 und K4
 
@@ -67,7 +114,7 @@ Fehler werden nur direkt um `get_token(force=True)` der Refresh-Instanz gefangen
 
 | K | Auslöser | Erscheint als | Rotationsstatus | Folge bei D11 (b) |
 | --- | --- | --- | --- | --- |
-| K0 | `get_token(force=True)` endet ohne Ausnahme, liefert aber nicht `True` oder lässt den Refresh-Token unverändert | – | unklar oder verarbeitet | `auth_required`, Typ wird geloggt |
+| K0 | `get_token(force=True)` endet ohne Ausnahme, liefert aber nicht `True` | – | unklar oder verarbeitet | `auth_required`, Typ wird geloggt |
 | K1 | HTTP 400; leeres JSON ist davon nicht unterscheidbar | `AuthFailedError` ohne `__cause__` | endgültig ungültig | `auth_required` |
 | K2 | HTTP 401 am Token-Endpunkt | `AuthFailedError`, `__cause__` 401 | endgültig abgelehnt | `auth_required` |
 | K3 | HTTP 429 | `NotRespondingError`, `__cause__` 429 | nicht verarbeitet (Annahme, Q-K3) | Retry nach `Retry-After`, mindestens 60 s, höchstens 1 h; ≤ 3 POSTs/h, danach `disconnected`, bis das Fenster frei ist |
@@ -76,7 +123,7 @@ Fehler werden nur direkt um `get_token(force=True)` der Refresh-Instanz gefangen
 | K6 | Abbruch nach dem Senden | roh: `ServerDisconnectedError`, `ClientOSError`, `ClientPayloadError` | unklar oder verarbeitet | `auth_required` |
 | K7 | HTTP 500 und sonstige Statuscodes | `ApiError` | unklar | `auth_required` |
 | K8 | HTTP 403/404/502/504 | `{}` → `AttributeError` | unklar | `auth_required` |
-| K9 | 200 mit unbrauchbarem Body | `InvalidSensorDataError`, roh `ContentTypeError`, `KeyError` | verarbeitet, wahrscheinlich rotiert und verloren | `auth_required` |
+| K9 | 200 mit unbrauchbarem Body, auch ein Token, der kein nicht leerer Text ist | `InvalidSensorDataError`, roh `ContentTypeError`, `KeyError`; Typprüfung im Token-Manager | verarbeitet, wahrscheinlich rotiert und verloren | `auth_required`, Typ wird geloggt |
 | K10 | jede andere `Exception` | – | unklar oder verarbeitet | `auth_required`, Typ wird geloggt |
 
 Fehlt `auth.json` oder ist sie ungültig, folgt `auth_required` ohne POST.
@@ -90,6 +137,16 @@ erscheint als einfacher `TimeoutError`, auch wenn er im Aufbau ablief; er bleibt
 `ClientTimeout(total=15)` setzt, endet ein hängender Aufbau mit dieser Bibliothek als K5. K4 per Timeout entsteht
 erst, wenn ein `connect`- oder `sock_connect`-Timeout gesetzt ist. Tests mit echter `ClientSession` und hängendem
 Connector belegen beides.
+
+**Unveränderter Refresh-Token (Review PR 4):** Liefert der Server einen neuen Access-Token, aber denselben
+Refresh-Token, übernimmt der Dienst den Access-Token, behält den Refresh-Token, schreibt beide (Generation + 1)
+und loggt eine WARNING. Der Server hat dann nicht rotiert; OAuth erlaubt das. `auth_required` würde einen
+unnötigen Login erzwingen. Hat der Server doch rotiert und den alten Wert zurückgegeben, zeigt das der nächste
+Refresh als K1/K2, und erst dann folgt `auth_required`. Die WARNING macht den Fall im 24-h-Lauf (PR 6, Q-ROT)
+sichtbar.
+
+**K3-Zählung:** Das Fenster „≤ 3 POSTs/h“ zählt nur tatsächlich gesendete Refresh-POSTs. K4, Lock-Timeout und
+Dateisystemfehler vor dem POST zählen nicht.
 
 Scheitert ein Versuch, werden die Tokens im Speicher auf den Stand davor zurückgesetzt. Das betrifft auch einen
 teilweise übernommenen Body, etwa bei K9 `KeyError`. Jeder neue Versuch nimmt den Lock neu, Wartezeiten liegen
@@ -109,9 +166,29 @@ Schalter.
 ## Deployment-Annahme T2
 
 Der Dienst muss beim Stoppen genug Zeit bekommen, damit ein laufender POST (bis 15 s) samt Schreiben fertig
-wird. Angenommen sind `stop_grace_period: 20s` in Compose bzw. `docker run --stop-timeout 20`. Das reicht, weil
-`aclose()` das Warten auf den Lock abbricht; vor dem POST ist das sicher. Signal-Handler und Compose-Eintrag
-folgen in PR 6.
+wird. Die Docker-Voreinstellung von 10 s reicht dafür nicht. `stop_grace_period: 20s` in Compose bzw.
+`docker run --stop-timeout 20` sind deshalb Pflicht; PR 6 setzt den Compose-Eintrag und dokumentiert beides in
+`docs/operations.md`. Das reicht, weil `aclose()` das Warten auf den Lock abbricht; vor dem POST ist das sicher.
+Signal-Handler folgen ebenfalls in PR 6.
+
+**Shutdown-Vertrag:** `main` ruft `await token_manager.aclose()` im `finally` auf, bevor die `ClientSession`
+geschlossen wird. Eine gescheiterte Refresh-Task loggt ein Done-Callback mit ihrem Typnamen, sodass keine Ausnahme
+unabgeholt bleibt.
+
+## Akzeptierte Restrisiken
+
+- **Hängender Verbindungsaufbau (Accepted risk, Nutzerentscheidung 2026-10-06, Entscheidung A):** Mit
+  `homecom_alt` 1.8.2 (`ClientTimeout(total=15)`) endet ein hängender Verbindungsaufbau als K5 und damit in
+  `auth_required`, obwohl nichts gesendet wurde. Das ist als Restrisiko akzeptiert. PR 6 führt **keinen**
+  `connect`-Timeout ein.
+- **Absturz während des POST (Info I1):** Es gibt keinen Write-Ahead-Marker vor dem POST. Stirbt der Prozess
+  zwischen Senden und Schreiben, kann ein rotierter Refresh-Token verloren gehen; nach dem Neustart folgt dann
+  K1/K2 und ein Login. Ein Marker vor jedem POST würde jeden Neustart nach einem Absturz in `auth_required`
+  schicken, auch wenn der POST nie rausging. Abgewogen ist das gegen die kurze Lücke; den geordneten Stopp deckt
+  T2 ab (Docker-Voreinstellung 10 s < POST-Timeout 15 s, daher 20 s Pflicht).
+- **Backup-Restore ersetzt die Tokens bewusst:** Ein zurückgespieltes `auth.json` wird übernommen (Datei-Identität).
+  Backups enthalten Live-Secrets und gehören entsprechend geschützt. Weil Refresh-Tokens einmal verwendbar sind,
+  ist der Token im Backup nach einem Restore meist schon verbraucht; dann folgt K1/K2 und ein neuer Login.
 
 ## Alternativen
 
@@ -132,3 +209,6 @@ folgen in PR 6.
   Tests nehmen 3600 s an und kennzeichnen den Wert als Annahme. PR 6 misst sie im 24-h-Lauf und trägt sie hier
   nach, zusammen mit Poll-Dauer, Rotation (ja/nein) und 429-Zähler.
 - Q-K3 („429 = nicht verarbeitet“) und Q-ROT (Widerruf der Token-Familie) bleiben offen.
+- **Neustartverhalten:** Ein Neustart umgeht weder `auth_required` noch das K3-Limit; beides steht in `auth.json`.
+  Einen Block hebt nur ein Login auf. Wer die Datei von Hand bearbeitet, muss die Felder `refresh_blocked` und
+  `blocked_generation` gemeinsam entfernen; ein Backup mit Block bleibt nach dem Zurückspielen blockiert.

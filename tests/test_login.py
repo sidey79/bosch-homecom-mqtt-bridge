@@ -161,7 +161,10 @@ class LoginTest(unittest.TestCase):
         self.assertEqual(exit_code, 0, err)
         saved = json.loads(self.path.read_text())
         self.assertEqual((saved["generation"], saved["refresh_token"], saved["brand"]), (5, REFRESH, "bosch"))
-        self.assertIsNone(saved["last_refresh_at"])
+        self.assertIsNone(saved["last_refresh_at"])  # m9: only the service refresh sets it
+        # D7: the access token and its exp are persisted.
+        self.assertEqual(saved["access_token"], self.access)
+        self.assertEqual(saved["exp"], jwt.decode(self.access, options={"verify_signature": False})["exp"])
         self.assertIn("Generation 5", out)
         self.assertIn("Gateway 101506113: Typ wddw2", out)
         remaining = int(re.search(r"gültig noch (-?\d+) s", out).group(1))
@@ -434,6 +437,38 @@ class LoginTest(unittest.TestCase):
         self.assertNotEqual(exit_code, 0)
         self.assertEqual(out.getvalue(), "")
         self.assertEqual(session.calls, [])
+
+
+    def test_login_sets_a_new_login_id_and_clears_refresh_marks(self) -> None:
+        async def blocked(current):
+            return store_module.RefreshMarks("K2", 123.0, (100.0,))
+
+        asyncio.run(self.store.locked_update(blocked))
+        ids = []
+        for _ in range(2):
+            session = FakeSession(self.token_ok, self.gateways_ok)
+            exit_code, _out, err = self.login(session, self.redirect)
+            self.assertEqual(exit_code, 0, err)
+            saved = json.loads(self.path.read_text())
+            self.assertRegex(saved["login_id"], r"^[0-9a-f]{32}$")
+            self.assertEqual(
+                [saved[key] for key in ("refresh_blocked", "blocked_generation", "not_before", "refresh_posts")],
+                [None, None, None, []],
+            )
+            ids.append(saved["login_id"])
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_implausible_exp_is_saved_as_unknown_instead_of_failing(self) -> None:
+        # M-2: token_expires_at() of the library would raise on these after the code was redeemed.
+        for exp, readable in ((0.5, True), (10**400, False), (True, False), ("soon", False)):
+            with self.subTest(exp=exp):
+                self.access = jwt.encode({"exp": exp}, JWT_KEY, algorithm="HS256")
+                session = FakeSession(self.token_ok, self.gateways_ok)
+                exit_code, out, err = self.login(session, self.redirect)
+                self.assertEqual(exit_code, 0, err)
+                saved = json.loads(self.path.read_text())
+                self.assertEqual((saved["access_token"], saved["exp"]), (self.access, None))
+                self.assertEqual("Restlaufzeit des Access-Tokens unbekannt" in out, not readable)
 
 
 class ExtractCodeTest(unittest.TestCase):

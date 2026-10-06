@@ -17,6 +17,8 @@ LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
 MQTT_SCHEMES = ("mqtt", "mqtts")
 POLL_INTERVAL_MIN = 30
 POLL_INTERVAL_MAX = 3600
+POLL_TIMEOUT_MIN = 60
+POLL_TIMEOUT_MAX = 900
 DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 MQTT_FORBIDDEN = ("#", "+", "\x00")
 
@@ -38,6 +40,8 @@ class Config:
     bosch_poll_interval: int
     health_port: int
     log_level: str
+    # Upper bound for discovery and one poll; never wraps a token refresh (ADR 0001).
+    bosch_poll_timeout: int
 
 
 def _get(env: Mapping[str, str], name: str) -> str | None:
@@ -125,4 +129,5 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         bosch_poll_interval=_int(env, "BOSCH_POLL_INTERVAL", 60, POLL_INTERVAL_MIN, POLL_INTERVAL_MAX),
         health_port=_int(env, "HEALTH_PORT", 8080, 1, 65535),
         log_level=_choice(env, "LOG_LEVEL", "info", LOG_LEVELS),
+        bosch_poll_timeout=_int(env, "BOSCH_POLL_TIMEOUT", 300, POLL_TIMEOUT_MIN, POLL_TIMEOUT_MAX),
     )
