@@ -20,15 +20,15 @@ Beispiele mit `<base>` = `bosch-homecom` und `<deviceId>` = `101506113`.
 
 | Nachricht | Topic | Retained | QoS | Payload-Beispiel |
 | --- | --- | --- | --- | --- |
-| Status | `bosch-homecom/event/status` | ja | 1 | `{"state":"ready","connected":true}` |
-| Status mit Text | `bosch-homecom/event/status` | ja | 1 | `{"state":"auth_required","connected":true,"message":"login required"}` |
-| Status (LWT) | `bosch-homecom/event/status` | ja | 1 | `{"state":"disconnected","connected":false}` |
-| Fehler | `bosch-homecom/event/error` | nein | 1 | `{"code":"AUTH_REQUIRED","message":"refresh token rejected"}` |
+| Status | `bosch-homecom/bridge/status` | ja | 1 | `{"state":"ready","connected":true}` |
+| Status mit Text | `bosch-homecom/bridge/status` | ja | 1 | `{"state":"auth_required","connected":true,"message":"login required"}` |
+| Status (LWT) | `bosch-homecom/bridge/status` | ja | 1 | `{"state":"disconnected","connected":false}` |
+| Fehler | `bosch-homecom/bridge/error` | nein | 1 | `{"code":"AUTH_REQUIRED","message":"refresh token rejected"}` |
 | Zustand | `bosch-homecom/101506113/state` | ja | 1 | `{"temperature":52.5,"heating":true,"mode":"eco","updated_at":"2026-10-04T12:00:00Z"}` |
 | Verfügbarkeit online | `bosch-homecom/101506113/availability` | ja | 1 | `online` |
 | Verfügbarkeit offline | `bosch-homecom/101506113/availability` | ja | 1 | `offline` |
 
-### `<base>/event/status`
+### `<base>/bridge/status`
 
 Retained, `{"state": "<Statuswert>", "connected": <bool>, "message": "<optional>"}`. `message` fehlt, wenn es
 nichts zu sagen gibt. `connected` heißt: Die Bridge ist mit dem Broker verbunden; es ist nur bei `disconnected`
@@ -48,12 +48,12 @@ veröffentlicht sie den zuletzt gesetzten Status erneut und überschreibt so den
 | `starting` | Prozess läuft, erster Abruf steht noch aus |
 | `ready` | Cloud erreichbar, Werte werden abgerufen |
 | `auth_required` | Kein gültiger Refresh-Token; `login` ist nötig |
-| `error` | Anderer anhaltender Fehler; Einzelheiten in `message` und `<base>/event/error` |
+| `error` | Anderer anhaltender Fehler; Einzelheiten in `message` und `<base>/bridge/error` |
 | `disconnected` | Bridge nicht mit dem Broker verbunden (Last Will oder geordneter Stopp) |
 
 Weitere Werte kommen nur mit einer Änderung dieses Vertrags hinzu. Konsumenten behandeln unbekannte Werte wie `error`.
 
-### `<base>/event/error`
+### `<base>/bridge/error`
 
 Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannte Codes: `AUTH_REQUIRED` (Refresh-Token fehlt oder abgelehnt) und `POLL_FAILED` (Abruf bei der Cloud
 fehlgeschlagen; einmal je Übergang in `error`, die Nachricht nennt nur den Ausnahmetyp). Weitere
@@ -75,7 +75,7 @@ Werte `null`): je Warmwasserkreis `dhw<n>_` + `operation_mode`, `air_box_tempera
 
 ### `<base>/<deviceId>/availability`
 
-Retained, `online` oder `offline` als Klartext. Gilt nur, solange `<base>/event/status` `connected: true` meldet;
+Retained, `online` oder `offline` als Klartext. Gilt nur, solange `<base>/bridge/status` `connected: true` meldet;
 bei `disconnected` sind alle Geräte als nicht verfügbar zu betrachten.
 
 ## Gültige Topic-Segmente
@@ -86,7 +86,7 @@ bei `disconnected` sind alle Geräte als nicht verfügbar zu betrachten.
 - `/`, `+`, `#` oder das Zeichen NUL (`\x00`) enthalten,
 - mit `$` beginnen (Systemtopics des Brokers).
 
-Zusätzlich ist `event` als `<deviceId>` verboten, weil es mit `<base>/event/...` kollidiert. Die Fehlermeldung
+Zusätzlich ist `bridge` als `<deviceId>` verboten, weil es mit `<base>/bridge/...` kollidiert. Die Fehlermeldung
 nennt die verletzte Regel, nicht den Wert.
 
 ## Verbindung
@@ -119,5 +119,5 @@ die Queue keine ältere Zustandsnachricht mehr enthält. Jeder Verlust wird mit 
 
 Discovery-Konfigurationen würden unter dem Discovery-Präfix von Home Assistant (`homeassistant/...`) liegen, also
 außerhalb von `<base>`, und auf die obigen Topics verweisen (`state_topic` = `<base>/<deviceId>/state`,
-`availability` = `<base>/<deviceId>/availability` und `<base>/event/status`). Umfang und Präfix entscheidet D2;
+`availability` = `<base>/<deviceId>/availability` und `<base>/bridge/status`). Umfang und Präfix entscheidet D2;
 bis dahin veröffentlicht die Bridge keine Discovery-Nachrichten.

@@ -32,7 +32,7 @@ Refresh-Token vernichten. Deshalb:
 
 Der Compose-Healthcheck fragt `/readyz`. `restart: unless-stopped` startet nur bei Prozessende neu, nicht bei
 `unhealthy`: Bei `auth_required` hilft kein Neustart, nur ein Login. Der Container bleibt dann `unhealthy`, und
-`<base>/event/status` meldet `auth_required` (Fehler-Event `AUTH_REQUIRED`).
+`<base>/bridge/status` meldet `auth_required` (Fehler-Event `AUTH_REQUIRED`).
 
 ## Broker und Netzwerk
 
