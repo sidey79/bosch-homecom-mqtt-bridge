@@ -14,7 +14,7 @@ from yarl import URL
 
 from bosch_homecom_mqtt_bridge.auth.token_manager import TokenManager
 from bosch_homecom_mqtt_bridge.config import load_config
-from bosch_homecom_mqtt_bridge.poller import Poller, error_name
+from bosch_homecom_mqtt_bridge.poller import Poller, error_cause, error_name
 from bosch_homecom_mqtt_bridge.publisher import MqttPublisher
 
 from .test_protocol import FakeClient, eventually
@@ -241,6 +241,34 @@ class ErrorNameTest(unittest.TestCase):
         attempt = Future(5)
         attempt.set_exception(TimeoutError("Bearer x"))
         self.assertEqual(error_name(RetryError(attempt)), "TimeoutError")
+
+
+class ErrorCauseTest(unittest.TestCase):
+    @staticmethod
+    def wrapped(cause: BaseException) -> Exception:
+        try:
+            raise RuntimeError("Bearer FAKE-secret") from cause
+        except RuntimeError as error:
+            return error
+
+    def test_http_status_and_type_name_only(self) -> None:
+        class Response(Exception):
+            status = 429
+
+        self.assertEqual(error_cause(self.wrapped(Response("Authorization: Bearer FAKE-secret"))), "HTTP 429")
+        self.assertEqual(error_cause(self.wrapped(TimeoutError("Bearer FAKE-secret"))), "TimeoutError")
+        self.assertIsNone(error_cause(RuntimeError("no cause")))
+
+    def test_retry_error_is_unwrapped_to_the_cause_of_the_last_attempt(self) -> None:
+        attempt = Future(5)
+        attempt.set_exception(self.wrapped(TimeoutError("Bearer FAKE-secret")))
+        self.assertEqual(error_cause(RetryError(attempt)), "TimeoutError")
+
+    def test_a_non_numeric_status_is_not_reported(self) -> None:
+        class Odd(Exception):
+            status = "Bearer FAKE-secret"
+
+        self.assertEqual(error_cause(self.wrapped(Odd())), "Odd")
 
 
 if __name__ == "__main__":
