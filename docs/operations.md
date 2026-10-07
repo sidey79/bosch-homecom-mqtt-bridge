@@ -67,21 +67,30 @@ Geräten landen: ein von Hand angelegtes **Bridge-Gerät** und je Gerät ein per
 `MQTT2_DEVICE`. Das Muster entspricht der zigbee2mqtt-Integration (`bridgeRegexp`); `<base>` ist hier
 `bosch-homecom`.
 
-**Ungetestet:** Die Konfiguration unten folgt der zigbee2mqtt-Integration. Geprüft mit echtem FHEM ist nur das
-Autocreate ohne `bridgeRegexp` (Readings `availability`, `state_<Schlüssel>`, z. B. `state_dhw1_outlet_temperature`,
-`state_hs_starts`, `state_updated_at`; Werte mit `null` im JSON erscheinen nicht als Reading). Ohne die folgenden
-Schritte landen die Readings der Bridge (`status_state`, `status_connected`) im Gerät des Geräts.
+**Geprüft** mit einem Bosch Tronic 7000 (`wddw2`) und echtem FHEM: Das `bridgeRegexp` legt `bosch_<deviceId>` per
+Autocreate an (Readings `state_<Schlüssel>`, z. B. `state_dhw1_outlet_temperature`, `state_hs_starts`,
+`state_updated_at`; Werte mit `null` im JSON erscheinen nicht als Reading), das Bridge-Gerät (Beispiel unten) wertet
+die Topics unter `bridge/` aus. Ohne die folgenden Schritte landen die Readings der Bridge (`status_state`, `status_connected`) im Gerät des
+Geräts.
 
 **1. Bridge-Gerät von Hand anlegen** (vor dem Autocreate der Geräte):
 
 ```
 defmod bosch_bridge MQTT2_DEVICE
 attr bosch_bridge IODev MQTT2_FHEM_Server
-attr bosch_bridge readingList bosch-homecom/bridge/status:.* { json2nameValue($EVENT, 'status_') } \
-  bosch-homecom/bridge/error:.* { json2nameValue($EVENT, 'error_') }
+attr bosch_bridge devicetopic bosch-homecom
+attr bosch_bridge readingList $DEVICETOPIC/bridge/status:.* { json2nameValue($EVENT, 'status_') } \
+  $DEVICETOPIC/bridge/error:.* { json2nameValue($EVENT, 'error_') }
 ```
-Das Gerät zeigt `status_state` (`ready`, `starting`, `auth_required`, `error`, `disconnected`), `status_connected`,
+`devicetopic` ist das Basis-Topic (`MQTT_BASE_TOPIC`), `$DEVICETOPIC` wird im `readingList` damit ersetzt. Das Gerät
+zeigt `status_state` (`ready`, `starting`, `auth_required`, `error`, `disconnected`), `status_connected`,
 `status_message` und beim letzten Fehler `error_code`/`error_message`.
+
+Die Bridge sendet den Status nur bei einer Änderung und beim Verbinden mit dem Broker, nicht periodisch. Ein neu
+angelegtes Bridge-Gerät zeigt deshalb erst nach der nächsten Änderung oder nach einem Neustart der Bridge
+(`docker compose restart bridge`) Readings. `<deviceId>/availability` wird ebenfalls nur bei einer Änderung gesendet.
+Der Last Will gilt nur für `bridge/status` (MQTT erlaubt einen Will je Verbindung); die Verfügbarkeit eines Geräts
+gilt, solange `bridge/status` `connected: true` meldet.
 
 **2. Geräte aus dem Autocreate ausnehmen, die nicht `bridge` sind:** am IO-Gerät (`MQTT2_SERVER` bzw. `MQTT2_CLIENT`)
 
