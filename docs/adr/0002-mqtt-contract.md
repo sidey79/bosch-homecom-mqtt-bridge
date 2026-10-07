@@ -1,7 +1,7 @@
 # ADR 0002: MQTT-Vertrag
 
-- **Status:** Accepted (für die Punkte unter „Entscheidung“, D10). Die Punkte unter
-  „Implementierungsableitungen“ sind nicht Teil von D10 und vom Nutzer zu bestätigen.
+- **Status:** Accepted. Die Punkte unter „Entscheidung“ sind D10; die Punkte unter „Implementierungsableitungen“ hat
+  die Umsetzung abgeleitet und der Repository-Inhaber am 2026-10-07 bestätigt.
 - **Entscheidung:** D10, getroffen von der Nutzerin bzw. dem Nutzer (Repository-Inhaber) im Rahmen der Umsetzung
   von PR 5 (`feat/mqtt-publisher`).
 - **Vertrag:** [`docs/mqtt-contract.md`](../mqtt-contract.md)
@@ -32,10 +32,10 @@ Verbindungsverlust und die Prüfung von Topic-Segmenten. Der Vertrag ist ein Mer
 - Bibliothek paho-mqtt 2.1.0 (gepinnt) mit `CallbackAPIVersion.VERSION2`. Der Publisher blockiert die
   asyncio-Loop nicht.
 
-## Implementierungsableitungen (vom Nutzer zu bestätigen)
+## Implementierungsableitungen (bestätigt am 2026-10-07)
 
-Die folgenden Festlegungen hat die Umsetzung aus D10 abgeleitet; D10 hat sie nicht entschieden. Sie gelten, bis
-die Nutzerin bzw. der Nutzer sie bestätigt oder ändert, und stehen so auch in `docs/mqtt-contract.md`.
+Die folgenden Festlegungen hat die Umsetzung aus D10 abgeleitet; D10 hat sie nicht entschieden. Sie sind bestätigt
+und stehen so auch in `docs/mqtt-contract.md`.
 
 - **Statuswerte `starting` und `error`** zusätzlich zu `ready`, `auth_required` und `disconnected`.
 - **`bridge` als reservierte Geräte-ID**, weil `<base>/bridge/...` sonst mit `<base>/<deviceId>/...` kollidiert.
