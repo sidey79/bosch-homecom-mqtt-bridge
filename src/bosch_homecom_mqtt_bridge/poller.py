@@ -36,6 +36,22 @@ def error_name(error: BaseException) -> str:
     return type(error).__name__
 
 
+def error_cause(error: BaseException) -> str | None:
+    """Underlying cause for the log: ``HTTP <status>`` or the type name, never a message or headers.
+
+    ``homecom_alt`` wraps timeouts and HTTP 429 alike in ``NotRespondingError``; the cause tells them apart.
+    """
+    if isinstance(error, RetryError):
+        error = error.last_attempt.exception() or error
+    cause = error.__cause__
+    if cause is None:
+        return None
+    status = getattr(cause, "status", None)
+    if isinstance(status, int) and not isinstance(status, bool):
+        return f"HTTP {status}"
+    return type(cause).__name__
+
+
 class Poller:
     def __init__(self, config: Config, publisher: MqttPublisher, interval: float | None = None) -> None:
         self._config = config
@@ -105,7 +121,8 @@ class Poller:
 
     def _failed(self, error: BaseException) -> None:
         name = error_name(error)
-        _LOGGER.warning("Cloud request failed: %s", name)
+        cause = error_cause(error)
+        _LOGGER.warning("Cloud request failed: %s%s", name, f" (cause: {cause})" if cause else "")
         if self.status == "auth_required":
             return  # the token manager already reported it; a login ends the state
         if self.status != "error":

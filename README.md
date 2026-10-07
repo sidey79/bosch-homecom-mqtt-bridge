@@ -33,10 +33,10 @@ Die Prototyp-Skripte aus der Machbarkeitsprüfung liegen unter [`scripts/prototy
 Das Multi-Arch-Image für `linux/amd64` und `linux/arm64` wird in der GitHub Container Registry veröffentlicht, sobald eine Version auf `main` erscheint:
 
 ```text
-ghcr.io/sidey79/bosch-homecom-mqtt-bridge:0.6.0
+ghcr.io/sidey79/bosch-homecom-mqtt-bridge:0.6.1
 ```
 
-Der Tag `0.6.0` entsteht, wenn sich `VERSION` auf `main` ändert; Builds ohne Änderung von `VERSION` veröffentlichen nur `sha-<commit>`.
+Der Tag `0.6.1` entsteht, wenn sich `VERSION` auf `main` ändert; Builds ohne Änderung von `VERSION` veröffentlichen nur `sha-<commit>`.
 
 Für reproduzierbare Deployments sollte die vollständige Version verwendet werden. Jeder Build von `main` erhält zusätzlich einen unveränderlichen `sha-<commit>`-Tag. Der Ablauf steht in [`RELEASE_POLICY.md`](RELEASE_POLICY.md).
 

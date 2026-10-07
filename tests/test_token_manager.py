@@ -222,6 +222,19 @@ class GenerationTest(ManagerTestCase):
         self.assertIsNotNone(saved["last_refresh_at"])
         self.assertEqual(manager.state, READY)
 
+    async def test_a_refresh_is_logged_with_numbers_only(self) -> None:
+        self.fx.seed(refresh="FAKE-refresh-seed", remaining=None)
+        session = self.fx.session()
+        manager = self.fx.manager(session)
+        api = manager.fetch_api()
+        with self.assertLogs("bosch_homecom_mqtt_bridge.auth.token_manager", "INFO") as logs:
+            await manager.run_poll(lambda: api.async_get_notifications(DEVICE))
+        lines = [line for line in logs.output if "Tokens refreshed" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"Tokens refreshed \(generation \d+, access token valid for \d+ s\)$")
+        self.assertNotIn(session.issued[0][0], lines[0])
+        self.assertNotIn("FAKE-refresh", lines[0])
+
     async def test_no_auth_file_means_auth_required_without_requests(self) -> None:
         session = self.fx.session()
         manager = self.fx.manager(session)

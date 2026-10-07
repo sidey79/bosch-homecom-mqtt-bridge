@@ -456,6 +456,9 @@ class TokenManager:
         if "update" in result:
             self._known(state)  # type: ignore[arg-type]
             self._unpersisted = None
+            exp = result["update"].exp
+            valid = f", access token valid for {int(exp - self._obtained_at)} s" if exp else ""
+            _LOGGER.info("Tokens refreshed (generation %d%s)", state.generation, valid)  # type: ignore[union-attr]
         if "update" in result or "marks" in result:
             self._pending_marks = None  # the file now holds newer bookkeeping
         outcome = result.get("outcome")
