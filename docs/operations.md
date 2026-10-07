@@ -92,6 +92,10 @@ angelegtes Bridge-Gerät zeigt deshalb erst nach der nächsten Änderung oder na
 Der Last Will gilt nur für `bridge/status` (MQTT erlaubt einen Will je Verbindung); die Verfügbarkeit eines Geräts
 gilt, solange `bridge/status` `connected: true` meldet.
 
+Geprüft mit `MQTT2_SERVER`: `docker compose kill bridge` (SIGKILL) setzt `status_state` auf `disconnected` und
+`status_connected` auf `false`, nach etwa 90 s (Keep-Alive 60 s). Es gibt kein eigenes Last-Will-Reading: Der Broker
+veröffentlicht den Will auf `bridge/status`. Ein Reading `LWT` lässt sich am Bridge-Gerät mit `userReadings` ableiten.
+
 **2. Geräte aus dem Autocreate ausnehmen, die nicht `bridge` sind:** am IO-Gerät (`MQTT2_SERVER` bzw. `MQTT2_CLIENT`)
 
 ```
