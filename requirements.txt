@@ -5,7 +5,7 @@ attrs==26.1.0
 frozenlist==1.8.0
 homecom_alt==1.8.2
 idna==3.20
-multidict==6.9.1
+multidict==7.1.0
 paho-mqtt==2.1.0
 propcache==0.5.4
 PyJWT==2.15.1
