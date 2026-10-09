@@ -1,7 +1,7 @@
 # ADR 0002: MQTT-Vertrag
 
-- **Status:** Accepted (für die Punkte unter „Entscheidung“, D10). Die Punkte unter
-  „Implementierungsableitungen“ sind nicht Teil von D10 und vom Nutzer zu bestätigen.
+- **Status:** Accepted. Die Punkte unter „Entscheidung“ sind D10; die Punkte unter „Implementierungsableitungen“ hat
+  die Umsetzung abgeleitet und der Repository-Inhaber am 2026-10-07 bestätigt.
 - **Entscheidung:** D10, getroffen von der Nutzerin bzw. dem Nutzer (Repository-Inhaber) im Rahmen der Umsetzung
   von PR 5 (`feat/mqtt-publisher`).
 - **Vertrag:** [`docs/mqtt-contract.md`](../mqtt-contract.md)
@@ -9,7 +9,7 @@
 ## Kontext
 
 PLAN.md enthielt einen Entwurf des MQTT-Vertrags (Topics `event/status`, `event/error`, `<deviceId>/state`,
-optional `cmd`). Offen waren Retain, QoS, Last Will, Verfügbarkeit, Schreibbefehle, Pufferung bei
+optional `cmd`; die Topics `event/…` heißen seit 0.7.0 `bridge/…`, siehe unten). Offen waren Retain, QoS, Last Will, Verfügbarkeit, Schreibbefehle, Pufferung bei
 Verbindungsverlust und die Prüfung von Topic-Segmenten. Der Vertrag ist ein Merge-Gate für PR 5, weil Konsumenten
 (FHEM, später Home Assistant) darauf aufbauen.
 
@@ -18,9 +18,9 @@ Verbindungsverlust und die Prüfung von Topic-Segmenten. Der Vertrag ist ein Mer
 - QoS 1 für alle Publishes. Basis-Topic `MQTT_BASE_TOPIC`, Default `bosch-homecom`.
 - Nur lesen: keine `cmd`-Topics. Home-Assistant-Discovery ist im Vertrag vorgesehen, wird aber erst nach D2
   umgesetzt.
-- `<base>/event/status` retained, `{"state": …, "connected": bool, "message": optional}`. Last Will auf demselben
+- `<base>/bridge/status` retained, `{"state": …, "connected": bool, "message": optional}`. Last Will auf demselben
   Topic mit `state` `disconnected` und `connected` `false`.
-- `<base>/event/error` nicht retained, `{"code": "AUTH_REQUIRED", "message": "…"}`.
+- `<base>/bridge/error` nicht retained, `{"code": "AUTH_REQUIRED", "message": "…"}`.
 - `<base>/<deviceId>/state` retained, flaches JSON der gelesenen Werte in SI-Einheiten ohne Einheitentext plus
   `updated_at` (ISO-8601, UTC).
 - `<base>/<deviceId>/availability` retained, `online` oder `offline`.
@@ -32,13 +32,13 @@ Verbindungsverlust und die Prüfung von Topic-Segmenten. Der Vertrag ist ein Mer
 - Bibliothek paho-mqtt 2.1.0 (gepinnt) mit `CallbackAPIVersion.VERSION2`. Der Publisher blockiert die
   asyncio-Loop nicht.
 
-## Implementierungsableitungen (vom Nutzer zu bestätigen)
+## Implementierungsableitungen (bestätigt am 2026-10-07)
 
-Die folgenden Festlegungen hat die Umsetzung aus D10 abgeleitet; D10 hat sie nicht entschieden. Sie gelten, bis
-die Nutzerin bzw. der Nutzer sie bestätigt oder ändert, und stehen so auch in `docs/mqtt-contract.md`.
+Die folgenden Festlegungen hat die Umsetzung aus D10 abgeleitet; D10 hat sie nicht entschieden. Sie sind bestätigt
+und stehen so auch in `docs/mqtt-contract.md`.
 
 - **Statuswerte `starting` und `error`** zusätzlich zu `ready`, `auth_required` und `disconnected`.
-- **`event` als reservierte Geräte-ID**, weil `<base>/event/...` sonst mit `<base>/<deviceId>/...` kollidiert.
+- **`bridge` als reservierte Geräte-ID**, weil `<base>/bridge/...` sonst mit `<base>/<deviceId>/...` kollidiert.
 - **Fehler-Events als zweite Verwurfsstufe:** Bei vollem Puffer werden sie erst verworfen, wenn keine
   Zustandsnachricht mehr übrig ist.
 - **Verfügbarkeit wird nie verworfen;** Status und Verfügbarkeit werden im Puffer **je Topic zusammengefasst**
@@ -52,6 +52,13 @@ die Nutzerin bzw. der Nutzer sie bestätigt oder ändert, und stehen so auch in 
 - **Geordneter Stopp:** Die Bridge wartet bis zu 5 s auf das PUBACK des Status `disconnected` und trennt erst
   dann mit DISCONNECT. Kommt es nicht, schließt sie die Verbindung ohne DISCONNECT, damit der Broker den Last
   Will veröffentlicht.
+
+## Änderung (0.7.0): Namensraum `bridge`
+
+Die Topics der Bridge heißen `<base>/bridge/status` und `<base>/bridge/error` (vorher `event/…`, übernommen aus dem
+Entwurf in PLAN.md). Der Name beschreibt, was dort liegt: Zustand und Fehler der Bridge selbst. Das ist ein Bruch der
+Schnittstelle (Entscheidung des Repository-Inhabers). Retained Nachrichten unter `<base>/event/…` bleiben im Broker
+stehen und müssen einmal gelöscht werden (`mosquitto_pub -r -n -t <base>/event/status`).
 
 ## Konsequenzen
 

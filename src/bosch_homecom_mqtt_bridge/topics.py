@@ -5,7 +5,7 @@ that a value can never widen a topic into a wildcard, a system topic or another 
 """
 from __future__ import annotations
 
-EVENT_SEGMENT = "event"
+BRIDGE_SEGMENT = "bridge"
 _FORBIDDEN_CHARS = ("/", "+", "#", "\x00")
 
 
@@ -29,10 +29,10 @@ def validate_segment(segment: str, what: str = "topic segment") -> str:
 
 
 def validate_device_id(device_id: str) -> str:
-    """A device ID is one topic level and must not collide with the ``event`` level."""
+    """A device ID is one topic level and must not collide with the ``bridge`` level."""
     validate_segment(device_id, "device ID")
-    if device_id == EVENT_SEGMENT:
-        raise TopicError(f"device ID must not be '{EVENT_SEGMENT}'")
+    if device_id == BRIDGE_SEGMENT:
+        raise TopicError(f"device ID must not be '{BRIDGE_SEGMENT}'")
     return device_id
 
 
@@ -48,11 +48,11 @@ class Topics:
 
     @property
     def status(self) -> str:
-        return f"{self.base}/{EVENT_SEGMENT}/status"
+        return f"{self.base}/{BRIDGE_SEGMENT}/status"
 
     @property
     def error(self) -> str:
-        return f"{self.base}/{EVENT_SEGMENT}/error"
+        return f"{self.base}/{BRIDGE_SEGMENT}/error"
 
     def state(self, device_id: str) -> str:
         return f"{self.base}/{validate_device_id(device_id)}/state"

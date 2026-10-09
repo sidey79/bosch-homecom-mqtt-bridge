@@ -111,7 +111,7 @@ class PollerTestCase(unittest.IsolatedAsyncioTestCase):
         return [(payload, retain) for t, payload, _qos, retain in self.clients[0].published if t == topic]
 
     def errors(self) -> list[dict]:
-        return [json.loads(p) for p, retain in self.messages(f"{BASE}/event/error") if not retain]
+        return [json.loads(p) for p, retain in self.messages(f"{BASE}/bridge/error") if not retain]
 
     async def delivered(self, condition) -> None:
         """The publisher drains asynchronously: wait until the messages reached the fake client."""
@@ -136,7 +136,7 @@ class EndToEndTest(PollerTestCase):
         self.assertEqual(state["dhw1_operation_mode"], "eco")
         self.assertTrue(all(isinstance(v, (int, float, str, bool, type(None))) for v in state.values()))
         self.assertEqual(self.messages(f"{BASE}/{DEVICE}/availability"), [(b"online", True)])
-        self.assertEqual(self.last(f"{BASE}/event/status"), {"state": "ready", "connected": True})
+        self.assertEqual(self.last(f"{BASE}/bridge/status"), {"state": "ready", "connected": True})
         # Discovery and every poll went through the fetch instance: no token call at all.
         self.assertEqual(self.session.token_posts, [])
         self.assertEqual(self.session.gateway_requests, 1)  # discovered once, not per poll
@@ -180,7 +180,7 @@ class FailureTest(PollerTestCase):
 
         self.assertEqual(self.poller.status, "auth_required")
         await self.delivered(lambda: self.errors() and self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"offline")
-        status = self.last(f"{BASE}/event/status")
+        status = self.last(f"{BASE}/bridge/status")
         self.assertEqual((status["state"], status["connected"]), ("auth_required", True))
         self.assertEqual([e["code"] for e in self.errors()], ["AUTH_REQUIRED"])
         self.assertEqual(len(self.session.token_posts), 1)
@@ -197,7 +197,7 @@ class FailureTest(PollerTestCase):
         await asyncio.wait_for(self.clock.blocked.wait(), 5)
 
         await self.delivered(lambda: self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"offline")
-        status = self.last(f"{BASE}/event/status")
+        status = self.last(f"{BASE}/bridge/status")
         self.assertEqual((status["state"], status["message"]), ("error", "cloud unreachable"))
 
     async def test_poll_failure_never_publishes_or_logs_secrets_and_recovers(self) -> None:

@@ -42,21 +42,21 @@ class SegmentValidationTest(unittest.TestCase):
 
     def test_event_is_reserved_as_device_id(self) -> None:
         with self.assertRaises(TopicError):
-            validate_device_id("event")
-        self.assertEqual(validate_segment("event"), "event")
+            validate_device_id("bridge")
+        self.assertEqual(validate_segment("bridge"), "bridge")
 
 
 class TopicsTest(unittest.TestCase):
     def test_topic_names(self) -> None:
         topics = Topics("bosch-homecom")
-        self.assertEqual(topics.status, "bosch-homecom/event/status")
-        self.assertEqual(topics.error, "bosch-homecom/event/error")
+        self.assertEqual(topics.status, "bosch-homecom/bridge/status")
+        self.assertEqual(topics.error, "bosch-homecom/bridge/error")
         self.assertEqual(topics.state("101506113"), "bosch-homecom/101506113/state")
         self.assertEqual(topics.availability("101506113"), "bosch-homecom/101506113/availability")
 
     def test_multi_level_base(self) -> None:
         topics = Topics("home/bosch")
-        self.assertEqual(topics.status, "home/bosch/event/status")
+        self.assertEqual(topics.status, "home/bosch/bridge/status")
         self.assertEqual(topics.state("1"), "home/bosch/1/state")
 
     def test_invalid_base_rejected(self) -> None:
@@ -67,7 +67,7 @@ class TopicsTest(unittest.TestCase):
 
     def test_device_topics_reject_wildcards(self) -> None:
         topics = Topics("bosch-homecom")
-        for device_id in ("a/b", "a+b", "a#b", "$x", "event"):
+        for device_id in ("a/b", "a+b", "a#b", "$x", "bridge"):
             with self.subTest(device_id=device_id):
                 with self.assertRaises(TopicError):
                     topics.state(device_id)

@@ -32,7 +32,7 @@ Refresh-Token vernichten. Deshalb:
 
 Der Compose-Healthcheck fragt `/readyz`. `restart: unless-stopped` startet nur bei Prozessende neu, nicht bei
 `unhealthy`: Bei `auth_required` hilft kein Neustart, nur ein Login. Der Container bleibt dann `unhealthy`, und
-`<base>/event/status` meldet `auth_required` (Fehler-Event `AUTH_REQUIRED`).
+`<base>/bridge/status` meldet `auth_required` (Fehler-Event `AUTH_REQUIRED`).
 
 ## Broker und Netzwerk
 
@@ -59,20 +59,62 @@ networks:
 In `.env` stehen `SMARTHOME_NETWORK` (Name des Netzwerks, `docker network ls`), `FHEM_MQTT_URL` und die
 Zugangsdaten. Nicht zusammen mit `docker-compose.mqtt.yml` verwenden.
 
-## FHEM (MQTT2_SERVER mit MQTT2_DEVICE, gegen ein echtes FHEM geprüft)
+## FHEM (MQTT2_SERVER mit MQTT2_DEVICE)
 
-Topics und Payloads stehen in [mqtt-contract.md](mqtt-contract.md). Läuft FHEM selbst als Broker (`MQTT2_SERVER`),
-legt Autocreate das Gerät `bosch-homecom_<deviceId>` als `MQTT2_DEVICE` an. Geprüft mit einem Bosch Tronic 7000
-(`wddw2`): Die Readings heißen `availability`, `state_<Schlüssel>` (z. B. `state_dhw1_outlet_temperature`,
-`state_hs_starts`, `state_updated_at`) und `status_state`/`status_connected` (Status der Bridge). Werte mit `null` im
-JSON (z. B. `dhw1_air_box_temperature` beim Tronic 7000) erscheinen nicht als Reading.
+Topics und Payloads stehen in [mqtt-contract.md](mqtt-contract.md). Die Bridge veröffentlicht zwei Arten von Topics:
+ihren eigenen Zustand unter `<base>/bridge/…` und je Gerät `<base>/<deviceId>/…`. In FHEM sollen beide in getrennten
+Geräten landen: ein von Hand angelegtes **Bridge-Gerät** und je Gerät ein per Autocreate angelegtes
+`MQTT2_DEVICE`. Das Muster entspricht der zigbee2mqtt-Integration (`bridgeRegexp`); `<base>` ist hier
+`bosch-homecom`.
 
-Wer lieber eigene Reading-Namen und ein Gerät pro `<deviceId>` möchte, setzt das Gerät von Hand an, hier mit
-`<deviceId>` = `101506113` und `<base>` = `bosch-homecom` (nicht getestet):
+**Geprüft** mit einem Bosch Tronic 7000 (`wddw2`) und echtem FHEM: Das `bridgeRegexp` legt `bosch_<deviceId>` per
+Autocreate an (Readings `state_<Schlüssel>`, z. B. `state_dhw1_outlet_temperature`, `state_hs_starts`,
+`state_updated_at`; Werte mit `null` im JSON erscheinen nicht als Reading), das Bridge-Gerät (Beispiel unten) wertet
+die Topics unter `bridge/` aus. Ohne die folgenden Schritte landen die Readings der Bridge (`status_state`, `status_connected`) im Gerät des
+Geräts.
+
+**1. Bridge-Gerät von Hand anlegen** (vor dem Autocreate der Geräte):
+
+```
+defmod bosch_bridge MQTT2_DEVICE
+attr bosch_bridge IODev MQTT2_FHEM_Server
+attr bosch_bridge devicetopic bosch-homecom
+attr bosch_bridge readingList $DEVICETOPIC/bridge/status:.* { json2nameValue($EVENT, 'status_') } \
+  $DEVICETOPIC/bridge/error:.* { json2nameValue($EVENT, 'error_') }
+```
+`devicetopic` ist das Basis-Topic (`MQTT_BASE_TOPIC`), `$DEVICETOPIC` wird im `readingList` damit ersetzt. Das Gerät
+zeigt `status_state` (`ready`, `starting`, `auth_required`, `error`, `disconnected`), `status_connected`,
+`status_message` und beim letzten Fehler `error_code`/`error_message`.
+
+Die Bridge sendet den Status nur bei einer Änderung und beim Verbinden mit dem Broker, nicht periodisch. Ein neu
+angelegtes Bridge-Gerät zeigt deshalb erst nach der nächsten Änderung oder nach einem Neustart der Bridge
+(`docker compose restart bridge`) Readings. `<deviceId>/availability` wird ebenfalls nur bei einer Änderung gesendet.
+Der Last Will gilt nur für `bridge/status` (MQTT erlaubt einen Will je Verbindung); die Verfügbarkeit eines Geräts
+gilt, solange `bridge/status` `connected: true` meldet.
+
+Geprüft mit `MQTT2_SERVER`: `docker compose kill bridge` (SIGKILL) setzt `status_state` auf `disconnected` und
+`status_connected` auf `false`, nach etwa 90 s (Keep-Alive 60 s). Es gibt kein eigenes Last-Will-Reading: Der Broker
+veröffentlicht den Will auf `bridge/status`. Ein Reading `LWT` lässt sich am Bridge-Gerät mit `userReadings` ableiten.
+
+**2. Geräte aus dem Autocreate ausnehmen, die nicht `bridge` sind:** am IO-Gerät (`MQTT2_SERVER` bzw. `MQTT2_CLIENT`)
+
+```
+attr MQTT2_FHEM_Server bridgeRegexp bosch-homecom/((?!bridge/)[A-Za-z0-9._-]+)/.*:.* "bosch_$1"
+```
+Nachrichten von `bosch-homecom/<deviceId>/…` gehören damit zum Gerät `bosch_<deviceId>` (z. B. `bosch_101468551`),
+Nachrichten unter `bosch-homecom/bridge/…` nicht. Die ID `bridge` ist im Vertrag reserviert, deshalb reicht der
+Ausschluss genau dieser Ebene (`(?!bridge/)`).
+
+**3. Aufräumen nach einem Umstieg:** Ein früher per Autocreate angelegtes Gerät (z. B. `bosch-homecom_101468551`)
+löschen, damit es nicht neben dem neuen Gerät weiter Readings hält. Retained Nachrichten unter `<base>/event/…` aus
+Versionen vor 0.7.0 einmal im Broker löschen: `mosquitto_pub -r -n -t bosch-homecom/event/status` (und `…/event/error`).
+
+Wer die Geräte lieber selbst anlegt, mit `<deviceId>` = `101506113` (nicht getestet):
 
 ```
 defmod bosch_tronic MQTT2_DEVICE
-attr bosch_tronic readingList bosch-homecom/101506113/state:.* { json2nameValue($EVENT) } \
+attr bosch_tronic IODev MQTT2_FHEM_Server
+attr bosch_tronic readingList bosch-homecom/101506113/state:.* { json2nameValue($EVENT, 'state_') } \
   bosch-homecom/101506113/availability:.* availability
 attr bosch_tronic devStateIcon online:10px-kreis-gruen offline:10px-kreis-rot
 ```

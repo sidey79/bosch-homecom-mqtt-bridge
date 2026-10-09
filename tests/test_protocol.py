@@ -399,12 +399,12 @@ class PublisherSetupTest(PublisherTestBase):
         await self.connect()
         await self.publisher.stop(timeout=1.0)
         topic, payload, qos, retain = self.client.published[-1]
-        self.assertEqual((topic, qos, retain), ("bosch-homecom/event/status", 1, True))
+        self.assertEqual((topic, qos, retain), ("bosch-homecom/bridge/status", 1, True))
         self.assertEqual(json.loads(payload)["state"], "disconnected")
         self.assertTrue(self.client.disconnected)
         self.assertFalse(self.client.loop_running)
         events = self.client.events
-        self.assertLess(events.index("ack:bosch-homecom/event/status"), events.index("disconnect"))
+        self.assertLess(events.index("ack:bosch-homecom/bridge/status"), events.index("disconnect"))
         self.assertNotIn("socket_close", events)
 
 
@@ -437,7 +437,7 @@ class PublisherPlainTest(PublisherTestBase):
         await eventually(lambda: len(self.client.published) == 2)
         topics = [entry[0] for entry in self.client.published]
         # the queued status is the current one, so no replay goes in front of it
-        self.assertEqual(topics, ["bosch-homecom/event/status", "bosch-homecom/101506113/state"])
+        self.assertEqual(topics, ["bosch-homecom/bridge/status", "bosch-homecom/101506113/state"])
         self.assertEqual(json.loads(self.client.published[0][1])["state"], "starting")
 
     async def test_status_republished_after_reconnect(self) -> None:
@@ -494,7 +494,7 @@ class PublisherPlainTest(PublisherTestBase):
         self.assertNotIn(Kind.STATE, {m.kind for m in queued})
         await self.connect()
         await eventually(lambda: len(self.client.published) == len(queued))
-        states = [json.loads(p)["state"] for t, p, _, _ in self.client.published if t.endswith("/event/status")]
+        states = [json.loads(p)["state"] for t, p, _, _ in self.client.published if t.endswith("/bridge/status")]
         self.assertEqual(states, ["auth_required"])
 
     async def test_state_with_nan_is_published_with_null(self) -> None:
@@ -508,7 +508,7 @@ class PublisherStopTest(PublisherTestBase):
     env = {"MQTT_URL": "mqtt://broker.example"}
 
     def status_states(self) -> list[str]:
-        return [json.loads(p)["state"] for t, p, _, _ in self.client.published if t.endswith("/event/status")]
+        return [json.loads(p)["state"] for t, p, _, _ in self.client.published if t.endswith("/bridge/status")]
 
     async def test_stop_waits_for_puback_with_backlog_beyond_window(self) -> None:
         client = self.client
@@ -536,9 +536,9 @@ class PublisherStopTest(PublisherTestBase):
             acker.join()
         self.assertEqual(len(client.published), backlog + 1)
         self.assertEqual(self.status_states(), ["disconnected"])
-        self.assertEqual(client.published[-1][0], "bosch-homecom/event/status")
+        self.assertEqual(client.published[-1][0], "bosch-homecom/bridge/status")
         events = client.events
-        self.assertLess(events.index("ack:bosch-homecom/event/status"), events.index("disconnect"))
+        self.assertLess(events.index("ack:bosch-homecom/bridge/status"), events.index("disconnect"))
         self.assertNotIn("socket_close", events)
         self.assertIn("loop_stop", events)
 
@@ -773,7 +773,7 @@ class PahoCompatibilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(context.check_hostname)
         self.assertFalse(client._tls_insecure)
-        self.assertEqual(client._will_topic, b"bosch-homecom/event/status")
+        self.assertEqual(client._will_topic, b"bosch-homecom/bridge/status")
         self.assertTrue(client._will_retain)
         self.assertEqual(client._will_qos, 1)
         # Fire paho's real callback signature (VERSION2) through the publisher.
