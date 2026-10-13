@@ -14,7 +14,7 @@ from yarl import URL
 
 from bosch_homecom_mqtt_bridge.auth.token_manager import TokenManager
 from bosch_homecom_mqtt_bridge.config import load_config
-from bosch_homecom_mqtt_bridge.poller import Poller, error_cause, error_name
+from bosch_homecom_mqtt_bridge.poller import FAILURE_THRESHOLD, Poller, error_cause, error_name
 from bosch_homecom_mqtt_bridge.publisher import MqttPublisher
 
 from .test_protocol import FakeClient, eventually
@@ -37,12 +37,18 @@ class CloudSession(FakeSession):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.fail_data: BaseException | None = None
+        self.fail_device: str | None = None  # every read of this device times out
+        self.on_device_failure = lambda: None
         self.gateway_requests = 0
 
     async def request(self, method, url, **kwargs):
         if self.fail_data is not None and "/gateways/" in url:
             self.calls.append((method, url, kwargs))
             raise self.fail_data
+        if self.fail_device is not None and f"/gateways/{self.fail_device}/" in url:
+            self.calls.append((method, url, kwargs))
+            self.on_device_failure()
+            raise TimeoutError
         if url.endswith("/gateways/"):
             self.gateway_requests += 1
         return await super().request(method, url, **kwargs)
@@ -221,6 +227,90 @@ class FailureTest(PollerTestCase):
         self.assertEqual(errors[0]["message"], "cloud request failed (ApiError)")
 
         self.session.fail_data = None
+        await eventually(lambda: self.poller.status == "ready")
+        await self.delivered(lambda: self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"online")
+
+    def fail_polls(self, count: int, pattern: list[bool] | None = None) -> list[int]:
+        """The next polls follow ``pattern`` (True fails with a timeout), by default ``count`` failures.
+
+        Returns the number of polls still to come from the pattern.
+        """
+        run_poll = self.tokens.run_poll
+        steps = list(pattern) if pattern is not None else [True] * count
+        remaining = [len(steps)]
+        self.statuses_at_failure: list[str] = []
+
+        async def failing(poll):
+            if steps:
+                remaining[0] -= 1
+                if steps.pop(0):
+                    self.statuses_at_failure.append(self.poller.status)
+                    raise TimeoutError
+            return await run_poll(poll)
+
+        self.tokens.run_poll = failing  # type: ignore[method-assign]
+        return remaining
+
+    async def test_failures_that_are_not_consecutive_change_no_mqtt_state(self) -> None:
+        await self.ready()
+        remaining = self.fail_polls(0, pattern=[True, True, False, True, True])
+        await eventually(lambda: not remaining[0])
+        states = len(self.messages(f"{BASE}/{DEVICE}/state"))
+        await eventually(lambda: len(self.messages(f"{BASE}/{DEVICE}/state")) > states)  # the next poll succeeded
+
+        self.assertEqual(self.poller.status, "ready")
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(self.messages(f"{BASE}/{DEVICE}/availability"), [(b"online", True)])
+
+    async def test_a_failing_device_goes_offline_alone_while_the_bridge_stays_ready(self) -> None:
+        self.session.gateways = [*CloudSession.gateways, {"deviceId": "303", "deviceType": "wddw2"}]
+        await self.ready()
+        await eventually(lambda: self.messages(f"{BASE}/303/state"))
+        online_at_failure: list[bool | None] = []
+        self.session.on_device_failure = lambda: online_at_failure.append(self.poller._online.get("303"))
+        self.session.fail_device = "303"
+        await self.delivered(lambda: self.messages(f"{BASE}/303/availability")[-1][0] == b"offline")
+
+        self.assertEqual(self.poller.status, "ready")
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(self.messages(f"{BASE}/{DEVICE}/availability"), [(b"online", True)])
+        self.assertEqual(self.messages(f"{BASE}/303/availability"), [(b"online", True), (b"offline", True)])
+        # Availability of 303 as each failing read began: offline only after the third failure in a row.
+        await eventually(lambda: len(online_at_failure) > FAILURE_THRESHOLD)
+        self.assertEqual(online_at_failure[: FAILURE_THRESHOLD + 1], [True] * FAILURE_THRESHOLD + [False])
+
+        self.session.fail_device = None
+        await self.delivered(lambda: self.messages(f"{BASE}/303/availability")[-1][0] == b"online")
+
+    async def test_failures_below_the_threshold_change_no_mqtt_state(self) -> None:
+        await self.ready()
+        states = len(self.messages(f"{BASE}/{DEVICE}/state"))
+        remaining = self.fail_polls(FAILURE_THRESHOLD - 1)
+        await eventually(lambda: not remaining[0] and len(self.messages(f"{BASE}/{DEVICE}/state")) > states)
+
+        self.assertEqual(self.poller.status, "ready")
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(self.messages(f"{BASE}/{DEVICE}/availability"), [(b"online", True)])
+        self.assertNotIn("error", [json.loads(p)["state"] for p, _r in self.messages(f"{BASE}/bridge/status")])
+        failed = [m for m in self.log.messages() if m.startswith("Cloud request failed")]
+        self.assertEqual(failed, ["Cloud request failed: TimeoutError (1 in a row)", "Cloud request failed: TimeoutError (2 in a row)"])
+
+    async def test_failures_during_auth_required_do_not_count_after_the_login(self) -> None:
+        self.poller.set_status("auth_required", "login required")
+        for _ in range(FAILURE_THRESHOLD):
+            self.poller._failed(TimeoutError())
+        self.poller.set_status("ready")  # the login succeeded
+        self.poller._failed(TimeoutError())
+        self.assertEqual(self.poller.status, "ready")
+
+    async def test_the_threshold_reports_error_and_offline_once(self) -> None:
+        await self.ready()
+        self.fail_polls(FAILURE_THRESHOLD)
+        await eventually(lambda: self.poller.status == "error")
+        await self.delivered(lambda: self.errors() and self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"offline")
+        self.assertEqual([e["code"] for e in self.errors()], ["POLL_FAILED"])
+        self.assertEqual(self.statuses_at_failure, ["ready"] * FAILURE_THRESHOLD)  # not before the last failure
+
         await eventually(lambda: self.poller.status == "ready")
         await self.delivered(lambda: self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"online")
 

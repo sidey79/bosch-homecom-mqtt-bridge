@@ -48,7 +48,7 @@ veröffentlicht sie den zuletzt gesetzten Status erneut und überschreibt so den
 | `starting` | Prozess läuft, erster Abruf steht noch aus |
 | `ready` | Cloud erreichbar, Werte werden abgerufen |
 | `auth_required` | Kein gültiger Refresh-Token; `login` ist nötig |
-| `error` | Anderer anhaltender Fehler; Einzelheiten in `message` und `<base>/bridge/error` |
+| `error` | Anderer anhaltender Fehler (beim Abruf: ab dem 3. Fehlschlag in Folge); Einzelheiten in `message` und `<base>/bridge/error` |
 | `disconnected` | Bridge nicht mit dem Broker verbunden (Last Will oder geordneter Stopp) |
 
 Weitere Werte kommen nur mit einer Änderung dieses Vertrags hinzu. Konsumenten behandeln unbekannte Werte wie `error`.
@@ -56,7 +56,8 @@ Weitere Werte kommen nur mit einer Änderung dieses Vertrags hinzu. Konsumenten 
 ### `<base>/bridge/error`
 
 Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannte Codes: `AUTH_REQUIRED` (Refresh-Token fehlt oder abgelehnt) und `POLL_FAILED` (Abruf bei der Cloud
-fehlgeschlagen; einmal je Übergang in `error`, die Nachricht nennt nur den Ausnahmetyp). Weitere
+3-mal in Folge fehlgeschlagen; einmal je Übergang in `error`, die Nachricht nennt nur den Ausnahmetyp). Einzelne
+Fehlschläge davor werden nur geloggt und ändern weder Status noch Verfügbarkeit. Weitere
 Codes folgen mit den Features, die sie auslösen, und werden hier ergänzt. Fehler-Events sind Hinweise, kein Zustand.
 
 ### `<base>/<deviceId>/state`
@@ -76,7 +77,8 @@ Werte `null`): je Warmwasserkreis `dhw<n>_` + `operation_mode`, `air_box_tempera
 ### `<base>/<deviceId>/availability`
 
 Retained, `online` oder `offline` als Klartext. Gilt nur, solange `<base>/bridge/status` `connected: true` meldet;
-bei `disconnected` sind alle Geräte als nicht verfügbar zu betrachten.
+bei `disconnected` sind alle Geräte als nicht verfügbar zu betrachten. `offline` folgt erst, wenn der Abruf eines Geräts
+3-mal in Folge fehlschlägt; ein erfolgreicher Abruf setzt den Zähler zurück.
 
 ## Gültige Topic-Segmente
 
