@@ -25,6 +25,9 @@ _LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 
 POLL_FAILED = "POLL_FAILED"
+# Consecutive failed polls before the bridge reports ``error`` and takes devices offline. Single cloud
+# timeouts are common and recover on the next poll; they are logged but change no MQTT state.
+FAILURE_THRESHOLD = 3
 
 
 def error_name(error: BaseException) -> str:
@@ -61,6 +64,8 @@ class Poller:
         self._message: str | None = None
         self._devices: dict[str, tuple[Adapter, Any]] = {}
         self._online: dict[str, bool] = {}
+        self._failures = 0  # consecutive failed cycles
+        self._device_failures: dict[str, int] = {}  # consecutive failed reads per device
         self._discovered = False
         self._unknown_types: set[str] = set()
 
@@ -118,13 +123,21 @@ class Poller:
             await self._poll(tokens)
         except Exception as error:  # noqa: BLE001 - classified by type name only
             self._failed(error)
+        else:
+            self._failures = 0
 
     def _failed(self, error: BaseException) -> None:
         name = error_name(error)
         cause = error_cause(error)
-        _LOGGER.warning("Cloud request failed: %s%s", name, f" (cause: {cause})" if cause else "")
+        self._failures += 1
+        _LOGGER.warning(
+            "Cloud request failed: %s%s (%d in a row)", name, f" (cause: {cause})" if cause else "", self._failures
+        )
         if self.status == "auth_required":
+            self._failures = 0  # counting starts afresh after the login
             return  # the token manager already reported it; a login ends the state
+        if self._failures < FAILURE_THRESHOLD:
+            return
         if self.status != "error":
             self._publisher.publish_error(POLL_FAILED, f"cloud request failed ({name})")
         self.set_status("error", f"cloud request failed ({name})")
@@ -172,8 +185,11 @@ class Poller:
                 values = await tokens.run_poll(lambda a=adapter, c=api, d=device_id: a.read(c, d))
             except Exception as error:  # noqa: BLE001 - classified by type name only
                 failure = error
-                self._set_online(device_id, False)
+                self._device_failures[device_id] = self._device_failures.get(device_id, 0) + 1
+                if self._device_failures[device_id] >= FAILURE_THRESHOLD:
+                    self._set_online(device_id, False)
                 continue
+            self._device_failures[device_id] = 0
             self._publisher.publish_state(device_id, values)
             self._set_online(device_id, True)
             ok += 1
