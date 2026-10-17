@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 
@@ -6,7 +7,7 @@ from homecom_alt.model import BHCDeviceWddw2
 from homecom_alt.wddw2 import HomeComWddw2
 
 from bosch_homecom_mqtt_bridge import protocol
-from bosch_homecom_mqtt_bridge.adapters import ADAPTERS, adapter_for, flatten_wddw2
+from bosch_homecom_mqtt_bridge.adapters import ADAPTERS, NoDataError, adapter_for, flatten_wddw2
 from bosch_homecom_mqtt_bridge.topics import Topics
 
 DEVICE = "101506113"
@@ -73,6 +74,24 @@ class AdapterTest(unittest.TestCase):
         values = flatten_wddw2(BHCDeviceWddw2(device=DEVICE, firmware=None, notifications=None, dhw_circuits=None))
         self.assertEqual(values["notifications"], None)
         self.assertIsNone(values["hs_actual_power"])
+
+    def test_a_read_without_any_value_is_an_error(self) -> None:
+        class Api:
+            def __init__(self, data: BHCDeviceWddw2) -> None:
+                self.data = data
+
+            async def async_update(self, device_id: str) -> BHCDeviceWddw2:
+                return self.data
+
+        # What homecom_alt builds when every resource returned 504: empty resources, no notifications.
+        unreachable = BHCDeviceWddw2(
+            device=DEVICE, firmware=[], notifications=[], dhw_circuits={},
+            heat_sources={"actualPower": {}}, water_total_consumption={}, holiday_mode={},
+        )
+        adapter = ADAPTERS["wddw2"]
+        with self.assertRaises(NoDataError):
+            asyncio.run(adapter.read(Api(unreachable), DEVICE))
+        self.assertEqual(asyncio.run(adapter.read(Api(sample()), DEVICE))["hs_actual_power"], 3.2)
 
     def test_api_comes_from_the_fetch_factory(self) -> None:
         class Tokens:

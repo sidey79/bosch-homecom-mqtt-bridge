@@ -20,6 +20,10 @@ _LOGGER = logging.getLogger(__name__)
 _DHW_ID = re.compile(r"dhw\d")
 
 
+class NoDataError(Exception):
+    """A read returned no value at all; the poller counts it as a failed poll."""
+
+
 class Adapter(Protocol):
     device_type: str
 
@@ -82,7 +86,12 @@ class Wddw2Adapter:
         return tokens.fetch_api(HomeComWddw2, device_id=device_id)
 
     async def read(self, api: Any, device_id: str) -> dict[str, object]:
-        return flatten_wddw2(await api.async_update(device_id))
+        values = flatten_wddw2(await api.async_update(device_id))
+        # homecom_alt turns a 502/504 into an empty answer and its own model turns missing notifications
+        # into an empty list, so a device the cloud cannot reach reads as all null and 0 notifications.
+        if all(value is None for key, value in values.items() if key != "notifications"):
+            raise NoDataError("the cloud returned no value for the device")
+        return values
 
 
 ADAPTERS: dict[str, Adapter] = {adapter.device_type: adapter for adapter in (Wddw2Adapter(),)}

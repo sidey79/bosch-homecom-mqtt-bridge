@@ -57,7 +57,10 @@ Weitere Werte kommen nur mit einer Änderung dieses Vertrags hinzu. Konsumenten 
 
 Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannte Codes: `AUTH_REQUIRED` (Refresh-Token fehlt oder abgelehnt) und `POLL_FAILED` (Abruf bei der Cloud
 3-mal in Folge fehlgeschlagen; einmal je Übergang in `error`, die Nachricht nennt nur den Ausnahmetyp). Einzelne
-Fehlschläge davor werden nur geloggt und ändern weder Status noch Verfügbarkeit. Weitere
+Fehlschläge davor werden nur geloggt und ändern weder Status noch Verfügbarkeit. Als Fehlschlag zählt auch ein
+Abruf, der keinen einzigen Wert liefert (`NoDataError`): Erreicht die Cloud das Gerät nicht, antwortet sie je
+Ressource mit 502/504, die Bibliothek macht daraus leere Werte, und ohne diese Regel erschiene das Gerät `online`
+mit lauter `null` und `notifications` 0. Weitere
 Codes folgen mit den Features, die sie auslösen, und werden hier ergänzt. Fehler-Events sind Hinweise, kein Zustand.
 
 ### `<base>/<deviceId>/state`
