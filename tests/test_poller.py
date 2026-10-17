@@ -295,6 +295,21 @@ class FailureTest(PollerTestCase):
         failed = [m for m in self.log.messages() if m.startswith("Cloud request failed")]
         self.assertEqual(failed, ["Cloud request failed: TimeoutError (1 in a row)", "Cloud request failed: TimeoutError (2 in a row)"])
 
+    async def test_gateway_timeouts_on_every_resource_count_as_failed_polls(self) -> None:
+        # homecom_alt answers a 504 with an empty resource instead of an error: an unreachable device.
+        await self.ready()
+        self.session.fail_data = http_error(504, url="https://cloud.invalid/x")
+        await eventually(lambda: self.poller.status == "error")
+        await self.delivered(lambda: self.errors() and self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"offline")
+
+        self.assertEqual(self.errors(), [{"code": "POLL_FAILED", "message": "cloud request failed (NoDataError)"}])
+        states = [json.loads(p) for p, _r in self.messages(f"{BASE}/{DEVICE}/state")]
+        self.assertTrue(all(s["dhw1_inlet_temperature"] is not None for s in states))  # no all-null state
+
+        self.session.fail_data = None
+        await eventually(lambda: self.poller.status == "ready")
+        await self.delivered(lambda: self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"online")
+
     async def test_failures_during_auth_required_do_not_count_after_the_login(self) -> None:
         self.poller.set_status("auth_required", "login required")
         for _ in range(FAILURE_THRESHOLD):
