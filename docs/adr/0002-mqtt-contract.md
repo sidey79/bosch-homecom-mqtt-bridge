@@ -60,7 +60,7 @@ Entwurf in PLAN.md). Der Name beschreibt, was dort liegt: Zustand und Fehler der
 Schnittstelle (Entscheidung des Repository-Inhabers). Retained Nachrichten unter `<base>/event/…` bleiben im Broker
 stehen und müssen einmal gelöscht werden (`mosquitto_pub -r -n -t <base>/event/status`).
 
-## Änderung: optionaler Login über MQTT
+## Änderung (0.8.0): optionaler Login über MQTT
 
 Entscheidung des Repository-Inhabers (2026-10-20): Ein abgelaufener oder gesperrter Login (`auth_required`, etwa nach
 K5) soll sich aus FHEM beheben lassen, ohne Terminal im Container. Dafür gibt es genau einen Befehl,
