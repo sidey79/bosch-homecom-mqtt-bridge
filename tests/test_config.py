@@ -146,6 +146,19 @@ class ConfigValidationTest(unittest.TestCase):
         lines = (Path(__file__).resolve().parents[1] / ".env.example").read_text().splitlines()
         self.assertIn("BOSCH_POLL_TIMEOUT=300", lines)
 
+    def test_mqtt_login_switch(self) -> None:
+        self.assertIs(load_config({}).mqtt_login_enabled, False)
+        self.assertIs(load_config({"MQTT_LOGIN_ENABLED": ""}).mqtt_login_enabled, False)
+        for value in ("true", "TRUE", "1", "yes", "on"):
+            with self.subTest(value=value):
+                self.assertIs(load_config({"MQTT_LOGIN_ENABLED": value}).mqtt_login_enabled, True)
+        for value in ("false", "0", "no", "off"):
+            with self.subTest(value=value):
+                self.assertIs(load_config({"MQTT_LOGIN_ENABLED": value}).mqtt_login_enabled, False)
+        self.assert_rejected({"MQTT_LOGIN_ENABLED": "maybe"}, "MQTT_LOGIN_ENABLED")
+        lines = (Path(__file__).resolve().parents[1] / ".env.example").read_text().splitlines()
+        self.assertIn("MQTT_LOGIN_ENABLED=false", lines)
+
     def test_queue_size_bounds(self) -> None:
         self.assertEqual(load_config({"MQTT_QUEUE_SIZE": "10"}).mqtt_queue_size, 10)
         self.assertEqual(load_config({"MQTT_QUEUE_SIZE": "100000"}).mqtt_queue_size, 100000)

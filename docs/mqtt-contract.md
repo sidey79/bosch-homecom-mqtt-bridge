@@ -11,7 +11,9 @@ gemeinsam.
 
 - Alle Publishes mit **QoS 1**.
 - Basis-Topic `<base>` = `MQTT_BASE_TOPIC`, Default `bosch-homecom`. Es darf mehrere Ebenen haben (`haus/bosch`).
-- Die Bridge **liest nur**. Es gibt keine `cmd`-Topics und keine Subscriptions.
+- Die Bridge **liest nur** bei der Cloud; sie schreibt nichts an Geräte. Einzige Ausnahme vom reinen Publizieren ist
+  der optionale [Login über MQTT](#login-über-mqtt-optional): Nur mit `MQTT_LOGIN_ENABLED=true` abonniert sie genau
+  ein Topic, `<base>/bridge/cmd/login`. Ohne den Schalter gibt es keine Subscriptions.
 - Payloads sind UTF-8. JSON ist kompakt (ohne Leerzeichen); die Feldreihenfolge ist nicht Teil des Vertrags.
 
 ## Topics
@@ -27,6 +29,8 @@ Beispiele mit `<base>` = `bosch-homecom` und `<deviceId>` = `101506113`.
 | Zustand | `bosch-homecom/101506113/state` | ja | 1 | `{"temperature":52.5,"heating":true,"mode":"eco","updated_at":"2026-10-04T12:00:00Z"}` |
 | Verfügbarkeit online | `bosch-homecom/101506113/availability` | ja | 1 | `online` |
 | Verfügbarkeit offline | `bosch-homecom/101506113/availability` | ja | 1 | `offline` |
+| Login ausstehend | `bosch-homecom/bridge/login` | ja | 1 | `{"state":"pending","url":"https://singlekey-id.com/auth/connect/authorize?…","expires_at":"2026-10-04T12:10:00Z"}` |
+| Login erledigt | `bosch-homecom/bridge/login` | ja | 1 | `{"state":"done"}` |
 
 ### `<base>/bridge/status`
 
@@ -55,7 +59,7 @@ Weitere Werte kommen nur mit einer Änderung dieses Vertrags hinzu. Konsumenten 
 
 ### `<base>/bridge/error`
 
-Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannte Codes: `AUTH_REQUIRED` (Refresh-Token fehlt oder abgelehnt) und `POLL_FAILED` (Abruf bei der Cloud
+Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannte Codes: `AUTH_REQUIRED` (Refresh-Token fehlt oder abgelehnt), `LOGIN_FAILED` (ein Schritt des [Logins über MQTT](#login-über-mqtt-optional) scheiterte; die Nachricht nennt den Schritt) und `POLL_FAILED` (Abruf bei der Cloud
 3-mal in Folge fehlgeschlagen; einmal je Übergang in `error`, die Nachricht nennt nur den Ausnahmetyp). Einzelne
 Fehlschläge davor werden nur geloggt und ändern weder Status noch Verfügbarkeit. Als Fehlschlag zählt auch ein
 Abruf, der keinen einzigen Wert liefert (`NoDataError`): Erreicht die Cloud das Gerät nicht, antwortet sie je
@@ -82,6 +86,40 @@ Werte `null`): je Warmwasserkreis `dhw<n>_` + `operation_mode`, `air_box_tempera
 Retained, `online` oder `offline` als Klartext. Gilt nur, solange `<base>/bridge/status` `connected: true` meldet;
 bei `disconnected` sind alle Geräte als nicht verfügbar zu betrachten. `offline` folgt erst, wenn der Abruf eines Geräts
 3-mal in Folge fehlschlägt; ein erfolgreicher Abruf setzt den Zähler zurück.
+
+## Login über MQTT (optional)
+
+Nur mit `MQTT_LOGIN_ENABLED=true` (Default `false`). Ersetzt `login` im Terminal; beide schreiben denselben neuen
+Login in `auth.json`, den der laufende Dienst innerhalb von etwa 10 s übernimmt.
+
+### `<base>/bridge/cmd/login` (Befehl an die Bridge)
+
+QoS 1, **nicht retained** senden. Retained-Befehle ignoriert die Bridge (mit WARNING), weil der Broker einen Code
+sonst bei jedem Verbinden erneut zustellen würde.
+
+| Payload | Wirkung |
+| --- | --- |
+| `start` | Neuer Login: PKCE-Verifier und `state` nur im Speicher, Login-URL auf `<base>/bridge/login`. Ersetzt einen ausstehenden Login. |
+| alles andere | Code-Eingabe: Weiterleitungs-URL (`…://app/login?code=…&state=…`), nur der Code oder eine ganze Zeile aus der Browser-Konsole, die diese URL enthält (`Failed to launch '…'`). |
+
+Eine Eingabe ohne Code für den ausstehenden Login (fremder `state`, kein `code`) beendet den Login nicht. Jede
+Eingabe mit Code beendet ihn, ob erfolgreich oder nicht, weil der Code dann verbraucht sein kann. Ohne Code-Eingabe
+läuft ein Login nach 10 Minuten ab.
+
+### `<base>/bridge/login`
+
+Retained, `{"state": "<Wert>"}`, bei `pending` zusätzlich `url` und `expires_at` (Format wie `updated_at`).
+
+| Wert | Bedeutung |
+| --- | --- |
+| `idle` | Kein Login ausstehend (nach dem Start, nach Ablauf und nach einem Fehlschlag) |
+| `pending` | Login gestartet; `url` im Browser öffnen, danach die Code-Eingabe senden |
+| `done` | Code eingelöst und gespeichert; `bridge/status` wechselt kurz darauf nach `ready` |
+
+Ein Fehlschlag folgt als `LOGIN_FAILED` auf `<base>/bridge/error`. Über MQTT gehen nur Login-URL und Code. Der
+Code ist einmal verwendbar und ohne den Verifier, den nur die Bridge kennt, wertlos; Tokens verlassen die Bridge
+nie. Wer auf das Befehls-Topic schreiben darf, kann allerdings einen Login anstoßen und die Bridge so an ein
+anderes Konto binden; der Schalter bleibt deshalb aus, wenn der Broker nicht abgesichert ist.
 
 ## Gültige Topic-Segmente
 

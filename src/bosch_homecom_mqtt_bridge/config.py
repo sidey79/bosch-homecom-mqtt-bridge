@@ -25,6 +25,8 @@ DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 MQTT_FORBIDDEN = ("#", "+", "\x00")
 QUEUE_SIZE_MIN = 10
 QUEUE_SIZE_MAX = 100000
+TRUE_VALUES = ("1", "true", "yes", "on")
+FALSE_VALUES = ("0", "false", "no", "off")
 
 
 class ConfigError(ValueError):
@@ -47,6 +49,8 @@ class Config:
     log_level: str
     # Upper bound for discovery and one poll; never wraps a token refresh (ADR 0001).
     bosch_poll_timeout: int
+    # Login over MQTT (<base>/bridge/cmd/login); off by default, then the bridge subscribes to nothing.
+    mqtt_login_enabled: bool = False
 
 
 def _get(env: Mapping[str, str], name: str) -> str | None:
@@ -73,6 +77,17 @@ def _choice(env: Mapping[str, str], name: str, default: str, allowed: tuple[str,
     if value not in allowed:
         raise ConfigError(f"{name} must be one of: {', '.join(allowed)}")
     return value
+
+
+def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = _get(env, name)
+    if raw is None:
+        return default
+    if raw.lower() in TRUE_VALUES:
+        return True
+    if raw.lower() in FALSE_VALUES:
+        return False
+    raise ConfigError(f"{name} must be one of: {', '.join(TRUE_VALUES + FALSE_VALUES)}")
 
 
 def _mqtt_url(env: Mapping[str, str]) -> str:
@@ -143,4 +158,5 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         health_port=_int(env, "HEALTH_PORT", 8080, 1, 65535),
         log_level=_choice(env, "LOG_LEVEL", "info", LOG_LEVELS),
         bosch_poll_timeout=_int(env, "BOSCH_POLL_TIMEOUT", 300, POLL_TIMEOUT_MIN, POLL_TIMEOUT_MAX),
+        mqtt_login_enabled=_bool(env, "MQTT_LOGIN_ENABLED", False),
     )

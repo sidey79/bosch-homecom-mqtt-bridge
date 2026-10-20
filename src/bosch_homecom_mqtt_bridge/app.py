@@ -1,7 +1,8 @@
 """The ``run`` command: wires publisher, token manager, poller and health server, and shuts down in order.
 
 Shutdown (ADR 0001): SIGTERM/SIGINT set a stop event. In the ``finally`` of ``run`` the token manager
-is closed first (a running refresh POST and its ``auth.json`` write finish), then the ``ClientSession``,
+is closed first, together with the MQTT login (a running refresh POST or code exchange and its ``auth.json``
+write finish), then the ``ClientSession``,
 then the MQTT publisher (final status, broker ack, at most 9 s). All of it stays within the container's
 ``stop_grace_period`` of 20 s; the publisher timeout is shortened if the refresh used up the time.
 """
@@ -18,6 +19,7 @@ from .auth.store import AuthStore
 from .auth.token_manager import TokenManager
 from .config import Config
 from .health import HealthServer
+from .mqtt_login import MqttLogin
 from .poller import Poller
 from .publisher import STOP_TIMEOUT, MqttPublisher
 
@@ -39,8 +41,10 @@ async def run(config: Config, stop: asyncio.Event | None = None) -> int:
     poller = Poller(config, publisher)
     health = HealthServer(config.health_port, lambda: readiness(poller.status, publisher.connected))
     session = ClientSession()
+    store = AuthStore(config.bosch_auth_path)  # shared, so its asyncio lock orders login and refresh
+    login = MqttLogin(store, config.bosch_brand, session, publisher) if config.mqtt_login_enabled else None
     tokens = TokenManager(
-        AuthStore(config.bosch_auth_path),
+        store,
         session,
         brand=config.bosch_brand,
         poll_timeout=config.bosch_poll_timeout,
@@ -48,6 +52,8 @@ async def run(config: Config, stop: asyncio.Event | None = None) -> int:
         on_error=publisher.publish_error,
     )
     try:
+        if login is not None:
+            login.start()  # registers the subscription before the first connect
         await publisher.start()
         publisher.publish_status("starting")
         await health.start()
@@ -56,7 +62,14 @@ async def run(config: Config, stop: asyncio.Event | None = None) -> int:
     finally:
         stopped_at = time.monotonic()
         try:
-            await tokens.aclose()
+            # Side by side, so a refresh waiting behind the login's store lock is cancelled at once and
+            # the two 15 s request timeouts do not add up.
+            results = await asyncio.gather(
+                *([login.aclose()] if login is not None else []), tokens.aclose(), return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
         finally:
             try:
                 await session.close()

@@ -1,6 +1,6 @@
 """Messages of the MQTT contract (docs/mqtt-contract.md, ADR 0002).
 
-All messages use QoS 1. Status, state and availability are retained; error events are not.
+All messages use QoS 1. Status, state, availability and login are retained; error events are not.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from .topics import Topics
 
 QOS = 1
 STATUS_STATES = ("starting", "ready", "auth_required", "error", "disconnected")
+LOGIN_STATES = ("idle", "pending", "done")
 AVAILABILITY_ONLINE = "online"
 AVAILABILITY_OFFLINE = "offline"
 UPDATED_AT = "updated_at"
@@ -27,6 +28,7 @@ class Kind(enum.Enum):
 
     STATUS = "status"
     AVAILABILITY = "availability"
+    LOGIN = "login"
     ERROR = "error"
     STATE = "state"
 
@@ -64,6 +66,19 @@ def error_message(topics: Topics, code: str, message: str) -> Message:
     if not isinstance(code, str) or not _ERROR_CODE.fullmatch(code):
         raise ValueError("error code must be UPPER_SNAKE_CASE")
     return Message(Kind.ERROR, topics.error, _json({"code": code, "message": message}), retain=False)
+
+
+def login_message(topics: Topics, state: str, url: str | None = None, expires_at: datetime | None = None) -> Message:
+    """Retained state of the MQTT login; ``url`` and ``expires_at`` only while ``pending``."""
+    if state not in LOGIN_STATES:
+        raise ValueError(f"login state must be one of: {', '.join(LOGIN_STATES)}")
+    if (state == "pending") != (url is not None and expires_at is not None):
+        raise ValueError("url and expires_at belong to a pending login only")
+    data: dict[str, object] = {"state": state}
+    if url is not None and expires_at is not None:
+        data["url"] = url
+        data["expires_at"] = format_timestamp(expires_at)
+    return Message(Kind.LOGIN, topics.login, _json(data), retain=True)
 
 
 def format_timestamp(moment: datetime) -> str:
