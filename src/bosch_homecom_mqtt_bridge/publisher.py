@@ -8,9 +8,12 @@ Messages first go into the bounded ``PublishQueue``. A drain task moves them to 
 broker connection is up and paho has room (``max_queued_messages_set``), so the total buffer is
 bounded and the overflow rule of the contract decides what is lost during an outage.
 
-Threading: the ``publish_*`` methods, ``start`` and ``stop`` must be called from the thread running the
-asyncio loop. Only the paho callbacks run in paho's thread, and they touch nothing but
-``call_soon_threadsafe``.
+Threading: the ``publish_*`` methods, ``on_login_command``, ``start`` and ``stop`` must be called from
+the thread running the asyncio loop. Only the paho callbacks run in paho's thread, and they touch nothing
+but ``call_soon_threadsafe`` and, in ``on_connect``, paho's own ``subscribe``.
+
+Subscriptions: only the login command topic, and only when a handler is registered (``MQTT_LOGIN_ENABLED``).
+With a clean session the broker forgets it on every disconnect, so it is renewed on every connect.
 """
 from __future__ import annotations
 
@@ -102,10 +105,15 @@ class MqttPublisher:
         self._drain_task: asyncio.Task[None] | None = None
         self._final: Message | None = None
         self._final_info: asyncio.Future[Any] | None = None
+        self._login_handler: Callable[[bytes, bool], None] | None = None
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def on_login_command(self, handler: Callable[[bytes, bool], None]) -> None:
+        """Subscribe to the login command topic; ``handler(payload, retained)`` runs in the asyncio loop."""
+        self._login_handler = handler
 
     def queued(self) -> list[Message]:
         return self._queue.snapshot()
@@ -117,6 +125,8 @@ class MqttPublisher:
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_publish = self._on_publish
+        client.on_message = self._on_message
+        client.on_subscribe = self._on_subscribe
         will = protocol.will_message(self.topics)
         client.will_set(will.topic, will.payload, qos=will.qos, retain=will.retain)
         if self._config.mqtt_username:
@@ -224,6 +234,9 @@ class MqttPublisher:
     def publish_availability(self, device_id: str, online: bool) -> None:
         self._enqueue(protocol.availability_message(self.topics, device_id, online))
 
+    def publish_login(self, state: str, url: str | None = None, expires_at: datetime | None = None) -> None:
+        self._enqueue(protocol.login_message(self.topics, state, url, expires_at))
+
     def _enqueue(self, message: Message) -> bool:
         if self._stopping:
             log.debug("MQTT publisher is stopping; %s message for %s ignored", message.kind.value, message.topic)
@@ -302,10 +315,31 @@ class MqttPublisher:
         if reason_code.is_failure:
             log.warning("MQTT broker refused the connection: %s", reason_code)
             return
+        if self._login_handler is not None:
+            result, _mid = client.subscribe(self.topics.login_command, qos=protocol.QOS)
+            if result != mqtt.MQTT_ERR_SUCCESS:
+                log.warning("MQTT subscription to the login command failed (rc %s)", result)
         self._call_in_loop(self._set_connected, True)
 
     def _on_disconnect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any) -> None:
         self._call_in_loop(self._set_connected, False)
+
+    def _on_subscribe(self, client: Any, userdata: Any, mid: int, reason_codes: Any, properties: Any) -> None:
+        if any(getattr(code, "is_failure", False) for code in reason_codes or ()):
+            log.warning("MQTT broker refused the subscription to the login command (ACL?)")
+
+    def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
+        handler = self._login_handler
+        if handler is not None and message.topic == self.topics.login_command:
+            self._call_in_loop(self._deliver, handler, bytes(message.payload), bool(message.retain))
+
+    def _deliver(self, handler: Callable[[bytes, bool], None], payload: bytes, retained: bool) -> None:
+        if self._stopping:
+            return
+        try:
+            handler(payload, retained)
+        except Exception as error:
+            log.error("MQTT login command failed (%s)", type(error).__name__)
 
     def _on_publish(self, client: Any, userdata: Any, mid: int, reason_code: Any, properties: Any) -> None:
         self._call_in_loop(self._wakeup.set)

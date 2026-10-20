@@ -27,6 +27,8 @@ PASSWORD = "FAKE-mqtt-password-value"
 DEVICE = "101506113"
 MOMENT = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 TOPICS = Topics("bosch-homecom")
+LOGIN_URL = "https://singlekey-id.com/auth/connect/authorize?…"
+LOGIN_EXPIRES = datetime(2026, 10, 4, 12, 10, tzinfo=timezone.utc)
 
 
 def section(markdown: str, heading: str) -> str:
@@ -81,6 +83,8 @@ BUILDERS: dict[str, Callable[[], protocol.Message]] = {
     ),
     "Verfügbarkeit online": lambda: protocol.availability_message(TOPICS, DEVICE, True),
     "Verfügbarkeit offline": lambda: protocol.availability_message(TOPICS, DEVICE, False),
+    "Login ausstehend": lambda: protocol.login_message(TOPICS, "pending", LOGIN_URL, LOGIN_EXPIRES),
+    "Login erledigt": lambda: protocol.login_message(TOPICS, "done"),
 }
 PUBLISHER_CALLS: dict[str, Callable[[MqttPublisher], None]] = {
     "Status": lambda p: p.publish_status("ready"),
@@ -89,6 +93,8 @@ PUBLISHER_CALLS: dict[str, Callable[[MqttPublisher], None]] = {
     "Zustand": lambda p: p.publish_state(DEVICE, {"temperature": 52.5, "heating": True, "mode": "eco"}, MOMENT),
     "Verfügbarkeit online": lambda p: p.publish_availability(DEVICE, True),
     "Verfügbarkeit offline": lambda p: p.publish_availability(DEVICE, False),
+    "Login ausstehend": lambda p: p.publish_login("pending", LOGIN_URL, LOGIN_EXPIRES),
+    "Login erledigt": lambda p: p.publish_login("done"),
 }
 
 
@@ -111,6 +117,11 @@ class ContractTableTest(unittest.TestCase):
         documented = {unquote(row[0]) for row in table_rows(text)}
         self.assertEqual(documented, set(protocol.STATUS_STATES))
 
+    def test_login_values_match_contract(self) -> None:
+        text = section(CONTRACT.read_text("utf-8"), "### `<base>/bridge/login`")
+        documented = {unquote(row[0]) for row in table_rows(text)}
+        self.assertEqual(documented, set(protocol.LOGIN_STATES))
+
 
 class ProtocolTest(unittest.TestCase):
     def test_status_retained_and_connected_flag(self) -> None:
@@ -132,6 +143,14 @@ class ProtocolTest(unittest.TestCase):
             with self.subTest(code=code):
                 with self.assertRaises(ValueError):
                     protocol.error_message(TOPICS, code, "x")
+
+    def test_login_url_only_while_pending(self) -> None:
+        self.assertEqual(json.loads(protocol.login_message(TOPICS, "idle").payload), {"state": "idle"})
+        self.assertIs(protocol.login_message(TOPICS, "idle").kind, Kind.LOGIN)
+        for args in (("pending",), ("pending", LOGIN_URL), ("done", LOGIN_URL, LOGIN_EXPIRES), ("waiting",)):
+            with self.subTest(args=args):
+                with self.assertRaises(ValueError):
+                    protocol.login_message(TOPICS, *args)
 
     def test_state_timestamp_is_utc(self) -> None:
         local = datetime(2026, 10, 4, 14, 0, 30, 999, tzinfo=timezone(timedelta(hours=2)))
@@ -245,6 +264,8 @@ class FakeClient:
         self.release_on_close = True
         self.loop_exit = threading.Event()
         self.events: list[str] = []
+        self.on_message: Any = None
+        self.subscriptions: list[tuple[str, int]] = []
         self._lock = threading.Lock()
         self._mid = 0
 
@@ -279,6 +300,16 @@ class FakeClient:
         self.disconnected = True
         self.events.append("disconnect")
         self.loop_exit.set()
+
+    def subscribe(self, topic: str, qos: int = 0) -> tuple[int, int]:
+        self.subscriptions.append((topic, qos))
+        return mqtt.MQTT_ERR_SUCCESS, 1
+
+    def fire_message(self, topic: str, payload: bytes, retain: bool = False) -> None:
+        message = mqtt.MQTTMessage(topic=topic.encode("utf-8"))
+        message.payload = payload
+        message.retain = retain
+        self._fire(self.on_message, message)
 
     def socket(self) -> FakeSocket:
         return FakeSocket(self)
@@ -427,6 +458,39 @@ class PublisherPlainTest(PublisherTestBase):
                 topic, payload, qos, retain = self.client.published[-1]
                 self.assertEqual((topic, qos, retain), (rows[name]["topic"], rows[name]["qos"], rows[name]["retain"]))
                 assert_payload(self, payload, rows[name]["payload"])
+
+    async def test_no_subscription_without_login_handler(self) -> None:
+        await self.connect()
+        self.assertEqual(self.client.subscriptions, [])
+
+    async def test_login_commands_reach_the_handler_in_the_loop(self) -> None:
+        received: list[tuple[bytes, bool, int]] = []
+        self.publisher.on_login_command(lambda payload, retained: received.append((payload, retained, threading.get_ident())))
+        await self.connect()
+        self.assertEqual(self.client.subscriptions, [("bosch-homecom/bridge/cmd/login", 1)])
+        self.client.fire_message("bosch-homecom/bridge/cmd/login", b"start")
+        self.client.fire_message("bosch-homecom/bridge/cmd/other", b"ignored")
+        self.client.fire_message("bosch-homecom/bridge/cmd/login", b"kept", retain=True)
+        await eventually(lambda: len(received) == 2)
+        self.assertEqual([(p, r) for p, r, _ in received], [(b"start", False), (b"kept", True)])
+        self.assertEqual({t for _, _, t in received}, {threading.get_ident()})  # the asyncio loop's thread
+        # The broker forgets the subscription with the clean session; every connect renews it.
+        self.client.fire_disconnect()
+        await eventually(lambda: not self.publisher.connected)
+        await self.connect()
+        self.assertEqual(len(self.client.subscriptions), 2)
+
+    async def test_failing_login_handler_is_logged_by_type(self) -> None:
+        def handler(payload: bytes, retained: bool) -> None:
+            raise RuntimeError("FAKE-secret-detail")
+
+        self.publisher.on_login_command(handler)
+        await self.connect()
+        with self.assertLogs(publisher_module.log, "ERROR") as logs:
+            self.client.fire_message("bosch-homecom/bridge/cmd/login", b"x")
+            await eventually(lambda: bool(logs.records))
+        self.assertIn("RuntimeError", logs.output[0])
+        self.assertNotIn("FAKE-secret-detail", logs.output[0])
 
     async def test_nothing_published_before_connect_then_in_order(self) -> None:
         self.publisher.publish_status("starting")

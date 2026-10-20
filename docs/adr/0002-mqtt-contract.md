@@ -60,13 +60,35 @@ Entwurf in PLAN.md). Der Name beschreibt, was dort liegt: Zustand und Fehler der
 Schnittstelle (Entscheidung des Repository-Inhabers). Retained Nachrichten unter `<base>/event/…` bleiben im Broker
 stehen und müssen einmal gelöscht werden (`mosquitto_pub -r -n -t <base>/event/status`).
 
+## Änderung (0.8.0): optionaler Login über MQTT
+
+Entscheidung des Repository-Inhabers (2026-10-20): Ein abgelaufener oder gesperrter Login (`auth_required`, etwa nach
+K5) soll sich aus FHEM beheben lassen, ohne Terminal im Container. Dafür gibt es genau einen Befehl,
+`<base>/bridge/cmd/login`, und ein retained Topic `<base>/bridge/login` mit Login-URL und Stand. Er ist nur mit
+`MQTT_LOGIN_ENABLED=true` aktiv (Default aus); ohne den Schalter abonniert die Bridge weiterhin nichts. D3 bleibt
+unberührt: An Geräte schreibt die Bridge nichts.
+
+- PKCE-Verifier und `state` bleiben im Speicher der Bridge; über MQTT gehen nur die Login-URL und der einmal
+  verwendbare Code. Tokens verlassen die Bridge nicht. Der Austausch nutzt denselben Code wie `login` im Terminal
+  (`redeem_code`) und schreibt einen neuen Login, den der Token-Manager wie bisher übernimmt.
+- Retained Befehle werden ignoriert, damit der Broker keinen Code aufbewahrt und erneut zustellt.
+- Die Weiterleitungs-URL der Bosch-App (`com.bosch.tt.dashtt.pointt://app/login`) ist beim Identity-Provider fest
+  registriert und lässt sich nicht auf die Bridge umleiten. Der Browser kann sie nicht öffnen; die Bridge nimmt
+  deshalb auch eine ganze Zeile aus der Browser-Konsole an, die diese URL enthält.
+- Verworfen: Login mit E-Mail und Passwort durch die Bridge (fragil gegen Änderungen der Login-Seite, Captcha und
+  zweiten Faktor; das Passwort liefe über MQTT). Eine Browser-Erweiterung, die die Weiterleitung abfängt, bleibt
+  möglich, braucht aber einen zusätzlichen Endpunkt.
+- Restrisiko: Wer auf das Befehls-Topic schreiben darf, kann einen Login anstoßen und die Bridge an ein anderes
+  Konto binden. Deshalb ist der Schalter aus, solange der Broker nicht abgesichert ist.
+
 ## Konsequenzen
 
 - Retained Status mit Last Will gibt Konsumenten jederzeit einen gültigen Zustand der Bridge, auch nach deren
   Absturz.
 - Zustandsnachrichten sind retained und tragen `updated_at`; ein Konsument erkennt veraltete Werte selbst.
   Verworfene Zwischenstände während eines Ausfalls kosten deshalb nur Historie, keinen aktuellen Zustand.
-- Schreibzugriff (D3) und Discovery (D2) erfordern eine Änderung dieses ADR bzw. ein Folge-ADR.
+- Schreibzugriff (D3) und Discovery (D2) erfordern eine Änderung dieses ADR bzw. ein Folge-ADR. Der optionale Login
+  über MQTT (Abschnitt oben) ist kein Schreibzugriff auf Geräte.
 - Zusätzliche Konfiguration: `MQTT_QUEUE_SIZE` (10–100000). Zugangsdaten in `MQTT_URL` lehnt die Konfiguration ab.
 
 ## Verworfene Alternativen

@@ -54,6 +54,15 @@ class Topics:
     def error(self) -> str:
         return f"{self.base}/{BRIDGE_SEGMENT}/error"
 
+    @property
+    def login(self) -> str:
+        return f"{self.base}/{BRIDGE_SEGMENT}/login"
+
+    @property
+    def login_command(self) -> str:
+        """The only subscribed topic; it exists only with ``MQTT_LOGIN_ENABLED``."""
+        return f"{self.base}/{BRIDGE_SEGMENT}/cmd/login"
+
     def state(self, device_id: str) -> str:
         return f"{self.base}/{validate_device_id(device_id)}/state"
 

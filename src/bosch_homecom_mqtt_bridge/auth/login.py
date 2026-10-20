@@ -44,6 +44,9 @@ EXIT_FAILED = 1
 
 # Server strings are shown only if they look like an identifier; anything else is shown as repr.
 _PRINTABLE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+# A redirect URL with a code inside other text; it ends at whitespace or a quote. Callers bound the
+# input length (the MQTT login refuses more than 4 KiB), because the search is not linear.
+_EMBEDDED_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>?]*\?[^\s'\"<>]*code=[^\s'\"<>]*")
 
 
 class LoginError(Exception):
@@ -73,6 +76,11 @@ def extract_code(text: str, expected_state: str) -> str:
     text = text.strip()
     if not text:
         raise LoginError("Keine Eingabe erhalten.")
+    # A whole browser console line ("Failed to launch '<redirect URL>' because ...") carries the
+    # redirect URL inside quotes; only the URL is used.
+    embedded = _EMBEDDED_URL.search(text)
+    if embedded and embedded.group(0) != text:
+        text = embedded.group(0)
     if "://" in text or "code=" in text:
         query = urlsplit(text).query if "://" in text else text.lstrip("?")
         params: dict[str, list[str]] = {}
@@ -86,6 +94,8 @@ def extract_code(text: str, expected_state: str) -> str:
         if params.get("state") != [expected_state]:
             raise LoginError("Der state der URL gehört nicht zu diesem Login. Bitte den Login neu starten.")
         code = codes[0]
+    elif any(char.isspace() for char in text):
+        raise LoginError("Die Eingabe enthält weder eine Weiterleitungs-URL noch einen Code.")
     else:
         code = unquote(text)
     return quote(code, safe="")
@@ -109,6 +119,61 @@ async def _exchange_code(api: HomeComAlt, code: str, verifier: str) -> tuple[str
     if not (isinstance(access, str) and access and isinstance(refresh, str) and refresh):
         raise LoginError("Der Token-Austausch lieferte keine Tokens. Bitte erneut einloggen.")
     return access, refresh
+
+
+class IssuedNotSavedError(AuthStoreError):
+    """The code was redeemed, but writing the issued tokens failed; the pair is lost."""
+
+
+def login_api(session: ClientSession, brand: str) -> tuple[HomeComAlt, ConnectionOptions]:
+    """Client for the token exchange; ``auth_provider=False`` makes ``get_token()`` a no-op, so it never refreshes."""
+    options = ConnectionOptions(brand=brand)
+    return HomeComAlt(session, options, auth_provider=False), options
+
+
+async def redeem_code(
+    store: AuthStore, api: HomeComAlt, options: ConnectionOptions, code: str, verifier: str
+) -> AuthState:
+    """Redeem ``code`` under the store lock and save the tokens as a new login.
+
+    Shared by the terminal and the MQTT login. Raises ``LoginError`` for a failed exchange, the store
+    errors before the code is redeemed, and ``IssuedNotSavedError`` if the write after it failed.
+    """
+    issued = False
+
+    async def exchange(_current: AuthState | None) -> AuthUpdate:
+        nonlocal issued
+        access, refresh = await _exchange_code(api, code, verifier)
+        issued = True
+        add_secret(access)
+        add_secret(refresh)
+        options.token = access
+        options.refresh_token = refresh
+        # D7: the access token is persisted too, so a restart can use it without a refresh. A new
+        # random login_id marks the file as a new login even if its generation starts over at 1.
+        # The token manager's refresh marks are not passed on: a login clears them.
+        return AuthUpdate(
+            refresh_token=refresh,
+            brand=options.brand,
+            access_token=access,
+            exp=persistable_exp(access),
+            login_id=secrets.token_hex(16),
+        )
+
+    # The store lock is taken before the code is redeemed. A lock timeout therefore aborts before
+    # validate_auth: no token pair has been issued, so nothing can be lost, and the user just
+    # starts the login again. Once the exchange succeeded the lock is already held, so writing the
+    # tokens cannot time out; a storage error at that point loses the issued pair
+    # (``IssuedNotSavedError``). Login does not set last_refresh_at: only the service refresh (crash-
+    # loop guard of the token manager) needs it, and the store carries the previous value over.
+    try:
+        saved = await store.locked_update(exchange)
+    except AuthStoreError as error:
+        if issued and not isinstance(error, IssuedNotSavedError):
+            raise IssuedNotSavedError(str(error)) from error
+        raise
+    assert saved is not None  # exchange always returns an update
+    return saved
 
 
 def _show(value: object) -> str:
@@ -165,39 +230,12 @@ async def run_login(
     add_secret(code)
     add_secret(unquote(code))
 
-    options = ConnectionOptions(brand=brand)
-    # auth_provider=False: get_token() is a no-op on this instance, so it never refreshes.
-    api = HomeComAlt(session, options, auth_provider=False)
-
-    issued = False
-
-    async def exchange(_current: AuthState | None) -> AuthUpdate:
-        nonlocal issued
-        access, refresh = await _exchange_code(api, code, verifier)
-        issued = True
-        add_secret(access)
-        add_secret(refresh)
-        options.token = access
-        options.refresh_token = refresh
-        # D7: the access token is persisted too, so a restart can use it without a refresh. A new
-        # random login_id marks the file as a new login even if its generation starts over at 1.
-        # The token manager's refresh marks are not passed on: a login clears them.
-        return AuthUpdate(
-            refresh_token=refresh,
-            brand=brand,
-            access_token=access,
-            exp=persistable_exp(access),
-            login_id=secrets.token_hex(16),
-        )
-
-    # The store lock is taken before the code is redeemed. A lock timeout therefore aborts before
-    # validate_auth: no token pair has been issued, so nothing can be lost, and the user just
-    # starts the login again. Once the exchange succeeded the lock is already held, so writing the
-    # tokens cannot time out; a storage error at that point loses the issued pair, which the
-    # message says (``issued``). Login does not set last_refresh_at: only the service refresh (crash-
-    # loop guard of the token manager) needs it, and the store carries the previous value over.
+    api, options = login_api(session, brand)
     try:
-        saved = await store.locked_update(exchange)
+        saved = await redeem_code(store, api, options, code, verifier)
+    except IssuedNotSavedError as error:
+        print(f"Token ausgestellt, aber nicht gespeichert ({error}). Bitte erneut einloggen.", file=err)
+        return EXIT_FAILED
     except LockTimeoutError:
         print(
             f"{store.lock_path} ist durch einen anderen Prozess gesperrt. Der Code wurde nicht "
@@ -217,13 +255,10 @@ async def run_login(
         )
         return EXIT_FAILED
     except AuthStoreError as error:
-        if issued:
-            print(f"Token ausgestellt, aber nicht gespeichert ({error}). Bitte erneut einloggen.", file=err)
-        else:
-            print(
-                f"Speicherfehler ({error}). Der Code wurde nicht eingelöst; bitte den Login erneut starten.",
-                file=err,
-            )
+        print(
+            f"Speicherfehler ({error}). Der Code wurde nicht eingelöst; bitte den Login erneut starten.",
+            file=err,
+        )
         return EXIT_FAILED
 
     print(f"Login gespeichert in {store.path} (Generation {saved.generation}).", file=out)

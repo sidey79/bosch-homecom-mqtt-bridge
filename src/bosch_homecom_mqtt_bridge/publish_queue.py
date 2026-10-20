@@ -1,8 +1,8 @@
 """Bounded publish queue with the overflow rule of the MQTT contract (ADR 0002).
 
-Status and availability messages are retained, so only the newest one per topic matters: a new one
-replaces the queued one of the same topic (it moves to the end). They are never dropped otherwise, so
-the queue can exceed its limit by at most one message per status or availability topic.
+Status, availability and login messages are retained, so only the newest one per topic matters: a new
+one replaces the queued one of the same topic (it moves to the end). They are never dropped otherwise,
+so the queue can exceed its limit by at most one message per status, availability or login topic.
 
 When the queue is full, the oldest state message is dropped first, error events only when no state
 message is left. The incoming message takes part in the choice as the newest of its kind, so a new
@@ -15,7 +15,7 @@ from collections import deque
 from .protocol import Kind, Message
 
 DROP_ORDER = (Kind.STATE, Kind.ERROR)
-COALESCED = (Kind.STATUS, Kind.AVAILABILITY)  # retained: only the newest message per topic is kept
+COALESCED = (Kind.STATUS, Kind.AVAILABILITY, Kind.LOGIN)  # retained: only the newest message per topic is kept
 DEFAULT_MAXSIZE = 1000
 
 

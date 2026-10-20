@@ -119,7 +119,72 @@ attr bosch_tronic readingList bosch-homecom/101506113/state:.* { json2nameValue(
 attr bosch_tronic devStateIcon online:10px-kreis-gruen offline:10px-kreis-rot
 ```
 
-Die Bridge liest nur; es gibt keine Befehle.
+Die Bridge liest nur; der einzige Befehl ist der optionale Login (nächster Abschnitt).
+
+### Login aus FHEM (optional)
+
+Mit `MQTT_LOGIN_ENABLED=true` im `.env` lässt sich der Login aus FHEM anstoßen, statt `login` im Terminal
+(Vertrag: [Login über MQTT](mqtt-contract.md#login-über-mqtt-optional)). Am Bridge-Gerät ergänzen:
+
+```
+attr bosch_bridge readingList $DEVICETOPIC/bridge/status:.* { json2nameValue($EVENT, 'status_') } \
+  $DEVICETOPIC/bridge/error:.* { json2nameValue($EVENT, 'error_') } \
+  $DEVICETOPIC/bridge/login:.* { json2nameValue($EVENT, 'login_') }
+attr bosch_bridge setList login:noArg $DEVICETOPIC/bridge/cmd/login start \
+  code:textField $DEVICETOPIC/bridge/cmd/login
+```
+
+Jeder `setList`-Eintrag steht auf einer eigenen Zeile (das `\` oben ist der Zeilenumbruch in `fhem.cfg` bzw. der
+Befehlszeile). Im Attribut-Dialog von FHEMWEB also so, mit `start` am Ende der ersten Zeile:
+
+```
+login:noArg $DEVICETOPIC/bridge/cmd/login start
+code:textField $DEVICETOPIC/bridge/cmd/login
+```
+
+Stehen beide Einträge in einer Zeile, sendet `set … login` den ganzen Rest als Payload, und die Bridge antwortet mit
+`no login pending; send start first`; ein Umbruch vor `start` sendet eine leere Payload (`Ignoring an empty login
+command` im Log).
+
+Optional zeigt ein `stateFormat` am Bridge-Gerät die Anleitung je nach Zustand an, beim laufenden Login mit Link
+auf die Login-Seite (Attribut-Dialog, Zeilenumbrüche dürfen bleiben):
+
+```perl
+{
+  my $s = ReadingsVal($name, 'status_state', '?');
+  if (ReadingsVal($name, 'login_state', '') eq 'pending') {
+    my $url = ReadingsVal($name, 'login_url', '');
+    my $bis = ReadingsVal($name, 'login_expires_at', '');
+    return "<b>Login läuft</b> (gültig bis $bis UTC)<br>"
+         . "1. In Chrome oder Edge F12 drücken und den Reiter <i>Konsole</i> öffnen<br>"
+         . "2. <a href=\"$url\" target=\"_blank\">Login-Seite öffnen</a> und bei SingleKey ID anmelden<br>"
+         . "3. In der Konsole die rote Zeile komplett kopieren, sie sieht so aus:<br>"
+         . "<code>Failed to launch 'com.bosch.tt.dashtt.pointt://app/login?code=…' because the scheme does not have a registered handler.</code><br>"
+         . "4. <i>set $name code</i> wählen, die Zeile einfügen und <i>set</i> klicken";
+  }
+  return "<b>Login nötig:</b> <i>set $name login</i> ausführen" if $s eq 'auth_required';
+  return $s eq 'ready' ? 'ready' : "$s: " . ReadingsVal($name, 'status_message', '');
+}
+```
+
+Die Anzeige wertet die Login-Readings nur bei `pending` und `auth_required` aus; stehengebliebene Readings
+(`login_url`, `error_*`, `status_message`) stören deshalb nicht.
+
+Ablauf:
+
+1. `set bosch_bridge login`. Das Reading `login_state` wird `pending`, `login_url` enthält die Login-URL.
+2. `login_url` im Desktop-Browser öffnen (Chrome oder Edge), vorher mit F12 die Entwicklertools auf dem Reiter
+   **Konsole** öffnen, und bei SingleKey ID anmelden.
+3. Am Ende meldet die Konsole `Failed to launch 'com.bosch.tt.dashtt.pointt://app/login?code=…&state=…' because the
+   scheme does not have a registered handler.` Diese **ganze Zeile** kopieren; die Bridge sucht die URL darin selbst.
+   Alternativ geht die URL aus dem Netzwerk-Reiter oder nur der Code.
+4. `set bosch_bridge code <eingefügte Zeile>`. `login_state` wird `done`, kurz darauf `status_state` `ready`.
+
+Nicht auf dem Handy: Dort öffnet die Weiterleitung die Bosch-App, die den Code selbst einlöst. Ein Fehlschlag steht
+in `error_code` `LOGIN_FAILED` mit dem Schritt in `error_message`; nach 10 Minuten ohne Code fällt `login_state` auf
+`idle` zurück. `setList` sendet nicht retained; so muss es bleiben, sonst ignoriert die Bridge den Befehl.
+`json2nameValue` löscht keine Readings, `login_url` bleibt also nach `done` stehen; sie gehört dann zu keinem
+Login mehr.
 
 ## Restrisiken (ADR 0001)
 

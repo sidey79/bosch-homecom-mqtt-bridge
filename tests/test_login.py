@@ -472,6 +472,18 @@ class LoginTest(unittest.TestCase):
 
 
 class ExtractCodeTest(unittest.TestCase):
+    def test_console_line_with_the_redirect_url(self) -> None:
+        url = "com.bosch.tt.dashtt.pointt://app/login?code=FAKE%2Bcode&state=S1"
+        for line in (
+            f"Failed to launch '{url}' because the scheme does not have a registered handler.",
+            f'Navigation to "{url}" blocked',
+            f"  {url}  ",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(extract_code(line, "S1"), quote("FAKE+code", safe=""))
+        with self.assertRaises(login_module.LoginError):
+            extract_code(f"Failed to launch '{url}'", "other-state")
+
     def test_plus_in_redirect_url_survives(self) -> None:
         self.assertEqual(extract_code("app://x/login?code=a+b%2Fc&state=s", "s"), "a%2Bb%2Fc")
 

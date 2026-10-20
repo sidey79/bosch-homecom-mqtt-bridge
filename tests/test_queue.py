@@ -99,6 +99,13 @@ class PublishQueueTest(unittest.TestCase):
             self.assertIsNone(queue.put(item))
         self.assertEqual(queue.snapshot(), [state(1), status("ready"), availability(False)])
 
+    def test_login_coalesced_and_never_dropped(self) -> None:
+        queue = PublishQueue(1)
+        queue.put(status("starting"))
+        self.assertIsNone(queue.put(protocol.login_message(TOPICS, "idle")))  # beyond the limit, not dropped
+        self.assertIsNone(queue.put(protocol.login_message(TOPICS, "done")))  # replaces the queued one
+        self.assertEqual(queue.snapshot(), [status("starting"), protocol.login_message(TOPICS, "done")])
+
     def test_state_and_error_not_coalesced(self) -> None:
         queue = PublishQueue(10)
         for item in (state(1), state(2), error(1), error(1)):
