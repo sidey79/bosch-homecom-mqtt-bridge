@@ -134,6 +134,42 @@ attr bosch_bridge setList login:noArg $DEVICETOPIC/bridge/cmd/login start \
   code:textField $DEVICETOPIC/bridge/cmd/login
 ```
 
+Jeder `setList`-Eintrag steht auf einer eigenen Zeile (das `\` oben ist der Zeilenumbruch in `fhem.cfg` bzw. der
+Befehlszeile). Im Attribut-Dialog von FHEMWEB also so, mit `start` am Ende der ersten Zeile:
+
+```
+login:noArg $DEVICETOPIC/bridge/cmd/login start
+code:textField $DEVICETOPIC/bridge/cmd/login
+```
+
+Stehen beide Einträge in einer Zeile, sendet `set … login` den ganzen Rest als Payload, und die Bridge antwortet mit
+`no login pending; send start first`; ein Umbruch vor `start` sendet eine leere Payload (`Ignoring an empty login
+command` im Log).
+
+Optional zeigt ein `stateFormat` am Bridge-Gerät die Anleitung je nach Zustand an, beim laufenden Login mit Link
+auf die Login-Seite (Attribut-Dialog, Zeilenumbrüche dürfen bleiben):
+
+```perl
+{
+  my $s = ReadingsVal($name, 'status_state', '?');
+  if (ReadingsVal($name, 'login_state', '') eq 'pending') {
+    my $url = ReadingsVal($name, 'login_url', '');
+    my $bis = ReadingsVal($name, 'login_expires_at', '');
+    return "<b>Login läuft</b> (gültig bis $bis UTC)<br>"
+         . "1. In Chrome oder Edge F12 drücken und den Reiter <i>Konsole</i> öffnen<br>"
+         . "2. <a href=\"$url\" target=\"_blank\">Login-Seite öffnen</a> und bei SingleKey ID anmelden<br>"
+         . "3. In der Konsole die rote Zeile komplett kopieren, sie sieht so aus:<br>"
+         . "<code>Failed to launch 'com.bosch.tt.dashtt.pointt://app/login?code=…' because the scheme does not have a registered handler.</code><br>"
+         . "4. <i>set $name code</i> wählen, die Zeile einfügen und <i>set</i> klicken";
+  }
+  return "<b>Login nötig:</b> <i>set $name login</i> ausführen" if $s eq 'auth_required';
+  return $s eq 'ready' ? 'ready' : "$s: " . ReadingsVal($name, 'status_message', '');
+}
+```
+
+Die Anzeige wertet die Login-Readings nur bei `pending` und `auth_required` aus; stehengebliebene Readings
+(`login_url`, `error_*`, `status_message`) stören deshalb nicht.
+
 Ablauf:
 
 1. `set bosch_bridge login`. Das Reading `login_state` wird `pending`, `login_url` enthält die Login-URL.
