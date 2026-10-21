@@ -4,7 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --target /deps -r requirements.txt
 RUN mkdir -p /out/data && chown 65532:65532 /out/data
 
-FROM gcr.io/distroless/python3-debian13:nonroot@sha256:f47f5807043391605425f2bd162b25f50cebdc90640bacc804e0177608fe5c65
+FROM gcr.io/distroless/python3-debian13:nonroot@sha256:727eccc5d83f11273c954652667b5b5a1c66120bd4cfb884e879ab77dcdf966a
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/deps:/app/src
 COPY --from=build /deps /deps
