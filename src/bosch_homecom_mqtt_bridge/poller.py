@@ -30,6 +30,15 @@ POLL_FAILED = "POLL_FAILED"
 FAILURE_THRESHOLD = 3
 
 
+class NoGatewaysError(Exception):
+    """Discovery listed no gateway at all; the poller counts it as a failed poll and discovers again.
+
+    ``homecom_alt`` >= 1.8.4 answers a refused or unavailable listing (403/404/502/504) with ``[]``, which
+    cannot be told apart from an account without gateways. Accepting it would end discovery for the life
+    of the process after a single cloud hiccup at start.
+    """
+
+
 def error_name(error: BaseException) -> str:
     """Type name of the failure; a tenacity ``RetryError`` is unwrapped to its cause."""
     if isinstance(error, RetryError):
@@ -153,6 +162,8 @@ class Poller:
         found = await tokens.run_poll(devices)
         if not isinstance(found, list):
             raise TypeError("unexpected discovery response")
+        if not found:
+            raise NoGatewaysError("the cloud listed no gateway")
         for entry in found:
             entry = entry if isinstance(entry, dict) else {}
             device_id, device_type = entry.get("deviceId"), entry.get("deviceType")
