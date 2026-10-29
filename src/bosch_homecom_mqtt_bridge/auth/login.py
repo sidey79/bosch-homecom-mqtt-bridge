@@ -279,8 +279,7 @@ async def run_login(
         print("Login gespeichert, Gateway-Abfrage abgebrochen.", file=err)
         raise
     except (Exception, KeyboardInterrupt) as error:
-        # AuthFailedError, ApiError, InvalidSensorDataError, ClientError, AttributeError (403/404/
-        # 502/504 arrive as {} and fail on {}.json() inside the library), ValueError for a broken
+        # AuthFailedError, ApiError, InvalidSensorDataError, ClientError, ValueError for a broken
         # JSON body, TimeoutError while reading it, and anything else: the token is already saved.
         print(f"Login gespeichert, Gateway-Abfrage fehlgeschlagen ({type(error).__name__}).", file=err)
         return EXIT_FAILED
@@ -288,7 +287,8 @@ async def run_login(
         print("Login gespeichert, Gateway-Abfrage lieferte eine unerwartete Antwort.", file=err)
         return EXIT_FAILED
     if not devices:
-        print("Login gespeichert, aber das Konto hat keine Gateways.", file=err)
+        # homecom_alt >= 1.8.4 also answers a refused or unavailable listing (403/404/502/504) with [].
+        print("Login gespeichert, aber die Cloud listet keine Gateways (keine vorhanden oder abgelehnt).", file=err)
         return EXIT_FAILED
     for device in devices:
         device = device if isinstance(device, dict) else {}

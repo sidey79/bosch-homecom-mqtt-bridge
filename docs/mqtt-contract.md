@@ -64,7 +64,9 @@ Nicht retained, `{"code": "<UPPER_SNAKE_CASE>", "message": "<Text>"}`. Bekannte 
 Fehlschläge davor werden nur geloggt und ändern weder Status noch Verfügbarkeit. Als Fehlschlag zählt auch ein
 Abruf, der keinen einzigen Wert liefert (`NoDataError`): Erreicht die Cloud das Gerät nicht, antwortet sie je
 Ressource mit 502/504, die Bibliothek macht daraus leere Werte, und ohne diese Regel erschiene das Gerät `online`
-mit lauter `null` und `notifications` 0. Weitere
+mit lauter `null` und `notifications` 0. Ebenso zählt eine leere Gateway-Liste bei der Erkennung
+(`NoGatewaysError`): Die Bibliothek liefert sie auch bei 403/404/502/504, die Erkennung wird deshalb beim nächsten
+Abruf wiederholt, statt nach einem kurzen Aussetzer beim Start dauerhaft ohne Geräte `ready` zu melden. Ein Konto ganz ohne Gateways bleibt so dauerhaft in `error`. Weitere
 Codes folgen mit den Features, die sie auslösen, und werden hier ergänzt. Fehler-Events sind Hinweise, kein Zustand.
 
 ### `<base>/<deviceId>/state`

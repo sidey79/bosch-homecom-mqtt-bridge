@@ -310,6 +310,23 @@ class FailureTest(PollerTestCase):
         await eventually(lambda: self.poller.status == "ready")
         await self.delivered(lambda: self.messages(f"{BASE}/{DEVICE}/availability")[-1][0] == b"online")
 
+    async def test_an_unavailable_gateway_listing_is_a_failed_poll_and_discovery_is_retried(self) -> None:
+        # homecom_alt >= 1.8.4 answers a 504 on the listing with [], indistinguishable from no gateways.
+        self.fx.seed(remaining=3600)
+        self.session.fail_data = http_error(504, url="https://cloud.invalid/x")
+        self.start()
+        await eventually(lambda: self.poller.status == "error")
+        await self.delivered(lambda: self.errors())
+
+        self.assertEqual(self.errors(), [{"code": "POLL_FAILED", "message": "cloud request failed (NoGatewaysError)"}])
+        self.assertEqual(self.messages(f"{BASE}/{DEVICE}/state"), [])
+        self.assertNotIn("ready", [json.loads(p)["state"] for p, _r in self.messages(f"{BASE}/bridge/status")])
+
+        self.session.fail_data = None
+        await eventually(lambda: self.poller.status == "ready" and self.messages(f"{BASE}/{DEVICE}/state"))
+        await self.delivered(lambda: self.messages(f"{BASE}/{DEVICE}/availability") == [(b"online", True)])
+        self.assertEqual(self.session.gateway_requests, 1)  # discovered once it succeeded, not per poll
+
     async def test_failures_during_auth_required_do_not_count_after_the_login(self) -> None:
         self.poller.set_status("auth_required", "login required")
         for _ in range(FAILURE_THRESHOLD):
