@@ -333,14 +333,18 @@ class LoginTest(unittest.TestCase):
         self.assert_no_secrets(session, out, err)
 
     def test_gateway_http_error_keeps_saved_login(self) -> None:
-        def gateway_403(method, url, kwargs):
-            raise http_error(method, url, 403)
+        # homecom_alt >= 1.8.4 turns a refused listing into [], like an account without gateways.
+        for generation, status in enumerate((403, 404, 502, 504), start=5):
+            with self.subTest(status=status):
+                def gateway_error(method, url, kwargs, status=status):
+                    raise http_error(method, url, status)
 
-        session = FakeSession(self.token_ok, gateway_403)
-        exit_code, _, err = self.login(session, self.redirect)
-        self.assertNotEqual(exit_code, 0)
-        self.assertIn("Login gespeichert, Gateway-Abfrage fehlgeschlagen (AttributeError)", err)
-        self.assertEqual(json.loads(self.path.read_text())["generation"], 5)
+                session = FakeSession(self.token_ok, gateway_error)
+                exit_code, _, err = self.login(session, self.redirect)
+                self.assertNotEqual(exit_code, 0)
+                self.assertIn("Login gespeichert, aber die Cloud listet keine Gateways", err)
+                self.assertEqual(json.loads(self.path.read_text())["generation"], generation)
+                self.assertEqual(session.urls(), [TOKEN_URL, GATEWAYS_URL])  # no retry
 
     def test_broken_gateway_json_keeps_saved_login(self) -> None:
         broken = json.JSONDecodeError("Expecting value", "FAKE-body", 0)
