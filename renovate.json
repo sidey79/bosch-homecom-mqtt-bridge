@@ -4,5 +4,12 @@
     "config:recommended",
     "docker:pinDigests",
     "default:automergeDigest"
+  ],
+  "packageRules": [
+    {
+      "description": "Patch updates are merged automatically",
+      "matchUpdateTypes": ["patch"],
+      "automerge": true
+    }
   ]
 }
